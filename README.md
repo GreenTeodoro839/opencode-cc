@@ -6,6 +6,8 @@
 （`POST /v1/messages`，支持流式与非流式），并将其翻译为 **[OpenCode Zen](https://opencode.ai/docs/zen/)**
 网关的原生协议。Zen 上有 49 个模型分属 4 种协议——本代理按目标 model id 自动路由到正确的协议翻译器，让 Claude Code 透明地跑在 GLM / Kimi / DeepSeek / Qwen / Claude / GPT / Gemini 等模型上。
 
+友情链接：[linuxdo](https://linux.do/)
+
 ```
 ┌────────────┐  POST /v1/messages   ┌──────────────┐  按 model 路由 ↓       ┌──────────┐
 │ Claude Code│ ───────────────────> │ opencode-cc  │ ──────────────────────> │ OpenCode │
