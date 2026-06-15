@@ -21,7 +21,7 @@ Community: [linuxdo](https://linux.do/)
                                            SQLite (pure Go, no CGO)
 ```
 
-<img width="2545" height="1191" alt="opencode-cc dashboard" src="https://github.com/user-attachments/assets/1aadd46f-5fe9-4812-a89f-42e4ef635487" />
+<img width="2540" height="1193" alt="QQ_1781519790308" src="https://github.com/user-attachments/assets/2854f45f-62a0-463a-9b22-a07a770670b4" />
 
 ## Automatic Routing Across Four Protocols
 
