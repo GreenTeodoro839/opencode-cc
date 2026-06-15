@@ -1,6 +1,6 @@
 # opencode-cc
 
-> Anthropic → OpenCode Zen 多协议桥接代理，附带嵌入式 Web 控制面板。
+> Anthropic → OpenCode Zen 多协议桥接代理，附带美观的嵌入式 Web 控制面板。
 
 `opencode-cc` 是一个高性能 Go 代理，对外暴露 **Anthropic Messages API**
 （`POST /v1/messages`，支持流式与非流式），并将其翻译为 **[OpenCode Zen](https://opencode.ai/docs/zen/)**
@@ -18,7 +18,6 @@
 ```
 
 <img width="2545" height="1191" alt="QQ_1781500954802" src="https://github.com/user-attachments/assets/1aadd46f-5fe9-4812-a89f-42e4ef635487" />
-
 
 ## 4 种协议自动路由
 

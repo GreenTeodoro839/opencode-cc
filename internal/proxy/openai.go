@@ -1,0 +1,129 @@
+package proxy
+
+// OpenAI Chat Completions types — the format we send to Zen and receive from
+// it. Only the fields needed for conversion are modelled.
+
+// OpenAIRequest is POST /v1/chat/completions.
+type OpenAIRequest struct {
+	Model       string            `json:"model"`
+	Messages    []OpenAIMessage   `json:"messages"`
+	MaxTokens   *int              `json:"max_tokens,omitempty"`
+	Temperature *float64          `json:"temperature,omitempty"`
+	TopP        *float64          `json:"top_p,omitempty"`
+	Stream      bool              `json:"stream,omitempty"`
+	StreamOptions *OpenAIStreamOptions `json:"stream_options,omitempty"`
+	Stop        []string          `json:"stop,omitempty"`
+	Tools       []OpenAITool      `json:"tools,omitempty"`
+	ToolChoice  any               `json:"tool_choice,omitempty"`
+}
+
+// OpenAIStreamOptions asks the upstream to include usage in the final chunk.
+type OpenAIStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
+// OpenAIMessage is one chat message.
+type OpenAIMessage struct {
+	Role             string             `json:"role"`
+	Content          any                `json:"content,omitempty"` // string or []OpenAIContentPart
+	ReasoningContent string             `json:"reasoning_content,omitempty"`
+	ToolCalls        []OpenAIToolCall   `json:"tool_calls,omitempty"`
+	ToolCallID       string             `json:"tool_call_id,omitempty"`
+	Name             string             `json:"name,omitempty"`
+}
+
+// OpenAIContentPart is one part of a multi-part message (images / text).
+type OpenAIContentPart struct {
+	Type     string                  `json:"type"`
+	Text     string                  `json:"text,omitempty"`
+	ImageURL *OpenAIImageURL         `json:"image_url,omitempty"`
+}
+
+// OpenAIImageURL wraps the url (data: or http(s):).
+type OpenAIImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// OpenAIToolCall is a tool invocation produced by the model.
+type OpenAIToolCall struct {
+	Index    int                `json:"index,omitempty"`
+	ID       string             `json:"id"`
+	Type     string             `json:"type"` // "function"
+	Function OpenAIFunctionCall `json:"function"`
+}
+
+// OpenAIFunctionCall is the function payload of a tool call.
+type OpenAIFunctionCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON string
+}
+
+// OpenAITool is a tool definition in the request.
+type OpenAITool struct {
+	Type     string             `json:"type"` // "function"
+	Function OpenAIToolFunction `json:"function"`
+}
+
+// OpenAIToolFunction is the function schema.
+type OpenAIToolFunction struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  jsonRawMessage `json:"parameters"`
+}
+
+// ---- Streaming chunks ----
+
+// OpenAIStreamChunk is one SSE "data:" line from the upstream.
+type OpenAIStreamChunk struct {
+	ID      string             `json:"id"`
+	Object  string             `json:"object"`
+	Model   string             `json:"model"`
+	Choices []OpenAIChoice     `json:"choices"`
+	Usage   *OpenAIUsage       `json:"usage,omitempty"`
+}
+
+// OpenAIChoice is one choice in a chunk.
+type OpenAIChoice struct {
+	Index        int              `json:"index"`
+	Delta        OpenAIDelta      `json:"delta,omitempty"`
+	Message      *OpenAIMessage   `json:"message,omitempty"`
+	FinishReason *string          `json:"finish_reason"`
+}
+
+// OpenAIDelta is the streaming delta.
+type OpenAIDelta struct {
+	Role             string           `json:"role,omitempty"`
+	Content          string           `json:"content,omitempty"`
+	ReasoningContent string           `json:"reasoning_content,omitempty"`
+	ToolCalls        []OpenAIToolCall `json:"tool_calls,omitempty"`
+}
+
+// OpenAIUsage is the usage block.
+type OpenAIUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+// ---- Non-streaming response ----
+
+// OpenAIResponse is the body of a non-streaming completion.
+type OpenAIResponse struct {
+	ID      string         `json:"id"`
+	Choices []OpenAIChoice `json:"choices"`
+	Usage   OpenAIUsage    `json:"usage"`
+}
+
+// OpenAIModelList is /v1/models.
+type OpenAIModelList struct {
+	Object string         `json:"object"`
+	Data   []OpenAIModel  `json:"data"`
+}
+
+// OpenAIModel is one entry in the model list.
+type OpenAIModel struct {
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	OwnedBy string `json:"owned_by,omitempty"`
+}

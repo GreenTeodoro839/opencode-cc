@@ -1,0 +1,296 @@
+package proxy
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+)
+
+// ConvertRequest turns an Anthropic Messages request into an OpenAI Chat
+// Completions request. It performs a structural translation of:
+//   - system prompt (string or blocks) -> first system message
+//   - message content (text / image / tool_use / tool_result)
+//   - tools and tool_choice
+//   - sampling params (temperature, top_p, max_tokens, stop)
+//
+// resolveModel is called to map the incoming model name to an upstream target.
+func ConvertRequest(in *AnthropicRequest, resolveModel func(string) string) *OpenAIRequest {
+	out := &OpenAIRequest{
+		Model:    resolveModel(in.Model),
+		Stream:   in.Stream,
+		Stop:     in.Stop,
+		MaxTokens: &in.MaxTokens,
+		Temperature: in.Temperature,
+		TopP:     in.TopP,
+	}
+
+	// System prompt first, if present.
+	if msgs := buildSystemMessages(in.System); len(msgs) > 0 {
+		out.Messages = append(out.Messages, msgs...)
+	}
+
+	for _, m := range in.Messages {
+		out.Messages = append(out.Messages, convertMessage(m)...)
+	}
+
+	// Tools.
+	if len(in.Tools) > 0 {
+		out.Tools = make([]OpenAITool, 0, len(in.Tools))
+		for _, t := range in.Tools {
+			out.Tools = append(out.Tools, OpenAITool{
+				Type: "function",
+				Function: OpenAIToolFunction{
+					Name:        t.Name,
+					Description: t.Description,
+					Parameters:  ensureObjectSchema(t.InputSchema),
+				},
+			})
+		}
+	}
+
+	// Tool choice. Anthropic shapes: {"type":"auto"|"any"|"tool","name":...}.
+	switch in.ToolChoice.Type {
+	case "auto":
+		out.ToolChoice = "auto"
+	case "any":
+		out.ToolChoice = "required"
+	case "tool":
+		if in.ToolChoice.Name != "" {
+			out.ToolChoice = map[string]any{
+				"type": "function",
+				"function": map[string]string{"name": in.ToolChoice.Name},
+			}
+		} else {
+			out.ToolChoice = "auto"
+		}
+	case "none":
+		out.ToolChoice = "none"
+	}
+
+	// Ask for usage in the final streamed chunk.
+	if out.Stream {
+		out.StreamOptions = &OpenAIStreamOptions{IncludeUsage: true}
+	}
+
+	return out
+}
+
+// buildSystemMessages turns the system field into one or more system messages.
+// Multi-block system prompts are concatenated into a single string, since the
+// OpenAI chat schema has no concept of multiple system blocks.
+func buildSystemMessages(sys AnthropicSystem) []OpenAIMessage {
+	if len(sys.Blocks) == 0 {
+		return nil
+	}
+	var sb []byte
+	for _, b := range sys.Blocks {
+		if b.Text != "" {
+			sb = append(sb, b.Text...)
+			sb = append(sb, '\n')
+		}
+	}
+	if len(sb) == 0 {
+		return nil
+	}
+	// drop trailing newline
+	if sb[len(sb)-1] == '\n' {
+		sb = sb[:len(sb)-1]
+	}
+	return []OpenAIMessage{{Role: "system", Content: string(sb)}}
+}
+
+// convertMessage maps a single Anthropic message to one or more OpenAI
+// messages. A user/assistant message with mixed content blocks may produce
+// multiple OpenAI messages (e.g. tool_result blocks become separate
+// role:"tool" messages followed by the remaining content as the user message).
+func convertMessage(m AnthropicMessage) []OpenAIMessage {
+	// Simple string content short-circuit.
+	if m.Content.IsStr {
+		return []OpenAIMessage{{Role: m.Role, Content: m.Content.Text}}
+	}
+
+	var out []OpenAIMessage
+	switch m.Role {
+	case "assistant":
+		out = append(out, convertAssistantBlocks(m)...)
+	case "user":
+		out = append(out, convertUserBlocks(m)...)
+	default:
+		// Pass through as a single text message.
+		out = append(out, OpenAIMessage{Role: m.Role, Content: contentBlocksToText(m.Content.Blocks)})
+	}
+	return out
+}
+
+// convertAssistantBlocks handles assistant messages, which may contain text and
+// tool_use blocks. Tool calls are emitted as part of the assistant message.
+func convertAssistantBlocks(m AnthropicMessage) []OpenAIMessage {
+	msg := OpenAIMessage{Role: "assistant"}
+	var toolCalls []OpenAIToolCall
+	var parts []OpenAIContentPart
+	hasText := false
+	for _, b := range m.Content.Blocks {
+		switch b.Type {
+		case "text":
+			parts = append(parts, OpenAIContentPart{Type: "text", Text: b.Text})
+			hasText = true
+		case "tool_use":
+			toolCalls = append(toolCalls, OpenAIToolCall{
+				ID:   b.ID,
+				Type: "function",
+				Function: OpenAIFunctionCall{
+					Name:      b.Name,
+					Arguments: compactJSON(b.Input),
+				},
+			})
+		case "thinking":
+			// Drop thinking blocks; OpenAI chat has no equivalent and they are
+			// internal reasoning the user shouldn't replay into the model.
+			continue
+		default:
+			parts = append(parts, OpenAIContentPart{Type: "text", Text: b.Text})
+			hasText = true
+		}
+	}
+	if len(parts) > 0 {
+		if len(parts) == 1 {
+			msg.Content = parts[0].Text
+		} else {
+			msg.Content = parts
+		}
+	} else if !hasText {
+		// Assistant message with only tool calls still needs a (possibly
+		// empty) content field for some upstreams; leave nil.
+		msg.Content = ""
+	}
+	msg.ToolCalls = toolCalls
+	return []OpenAIMessage{msg}
+}
+
+// convertUserBlocks handles user messages. tool_result blocks become standalone
+// role:"tool" messages; text/image blocks stay on the user message.
+func convertUserBlocks(m AnthropicMessage) []OpenAIMessage {
+	var out []OpenAIMessage
+	var parts []OpenAIContentPart
+
+	for _, b := range m.Content.Blocks {
+		switch b.Type {
+		case "tool_result":
+			out = append(out, OpenAIMessage{
+				Role:       "tool",
+				ToolCallID: b.ToolUseID,
+				Content:    toolResultText(b),
+			})
+		case "text":
+			parts = append(parts, OpenAIContentPart{Type: "text", Text: b.Text})
+		case "image":
+			if part := imageBlockToPart(b); part != nil {
+				parts = append(parts, *part)
+			}
+		default:
+			parts = append(parts, OpenAIContentPart{Type: "text", Text: b.Text})
+		}
+	}
+
+	if len(parts) > 0 {
+		um := OpenAIMessage{Role: "user"}
+		if len(parts) == 1 && parts[0].Type == "text" {
+			um.Content = parts[0].Text
+		} else {
+			um.Content = parts
+		}
+		// The user message goes AFTER the tool results so the model sees them
+		// in order. Append at the end.
+		out = append(out, um)
+	}
+	return out
+}
+
+// imageBlockToPart maps an Anthropic image block to an OpenAI image_url part.
+func imageBlockToPart(b AnthropicContent) *OpenAIContentPart {
+	if b.Source == nil {
+		return nil
+	}
+	var url string
+	switch b.Source.Type {
+	case "base64":
+		url = fmt.Sprintf("data:%s;base64,%s", b.Source.MediaType, b.Source.Data)
+	case "url":
+		url = b.Source.URL
+	default:
+		return nil
+	}
+	return &OpenAIContentPart{
+		Type:     "image_url",
+		ImageURL: &OpenAIImageURL{URL: url},
+	}
+}
+
+// toolResultText flattens a tool_result block's content to a string.
+func toolResultText(b AnthropicContent) string {
+	if b.Content == nil {
+		if b.IsError {
+			return "[error]"
+		}
+		return ""
+	}
+	if b.Content.IsStr {
+		if b.IsError {
+			return "[error] " + b.Content.Text
+		}
+		return b.Content.Text
+	}
+	// Concatenate text blocks.
+	var sb []byte
+	for _, cb := range b.Content.Blocks {
+		if cb.Type == "text" && cb.Text != "" {
+			sb = append(sb, cb.Text...)
+			sb = append(sb, '\n')
+		}
+	}
+	return string(sb)
+}
+
+// contentBlocksToText joins text blocks into one string (best-effort).
+func contentBlocksToText(blocks []AnthropicContent) string {
+	var sb []byte
+	for _, b := range blocks {
+		if b.Text != "" {
+			sb = append(sb, b.Text...)
+			sb = append(sb, ' ')
+		}
+	}
+	return string(sb)
+}
+
+// compactJSON re-serialises a JSON blob with no extraneous whitespace. If the
+// input isn't valid JSON it is returned verbatim (used as a string).
+func compactJSON(raw jsonRawMessage) string {
+	if len(raw) == 0 {
+		return "{}"
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err != nil {
+		return string(raw)
+	}
+	return buf.String()
+}
+
+// ensureObjectSchema guarantees the schema is a JSON object (the OpenAI spec
+// requires {"type":"object", ...}). Anthropic schemas sometimes omit "type".
+func ensureObjectSchema(raw jsonRawMessage) jsonRawMessage {
+	if len(raw) == 0 {
+		return jsonRawMessage(`{"type":"object"}`)
+	}
+	var probe map[string]any
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		// Not valid JSON; hand back a minimal object to be safe.
+		return jsonRawMessage(`{"type":"object"}`)
+	}
+	if _, ok := probe["type"]; !ok {
+		probe["type"] = "object"
+		b, _ := json.Marshal(probe)
+		return b
+	}
+	return raw
+}
