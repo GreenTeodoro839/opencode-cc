@@ -116,7 +116,7 @@ func (s *Server) clientAuth(next http.Handler) http.Handler {
 }
 
 func writeClientAPIError(w http.ResponseWriter, r *http.Request, status int, errType, msg string) {
-	if r != nil && r.URL.Path == "/v1/chat/completions" {
+	if r != nil && (r.URL.Path == "/v1/chat/completions" || r.URL.Path == "/v1/responses") {
 		writeOpenAIError(w, status, errType, msg)
 		return
 	}

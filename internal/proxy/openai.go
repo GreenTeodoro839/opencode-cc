@@ -5,16 +5,17 @@ package proxy
 
 // OpenAIRequest is POST /v1/chat/completions.
 type OpenAIRequest struct {
-	Model       string            `json:"model"`
-	Messages    []OpenAIMessage   `json:"messages"`
-	MaxTokens   *int              `json:"max_tokens,omitempty"`
-	Temperature *float64          `json:"temperature,omitempty"`
-	TopP        *float64          `json:"top_p,omitempty"`
-	Stream      bool              `json:"stream,omitempty"`
-	StreamOptions *OpenAIStreamOptions `json:"stream_options,omitempty"`
-	Stop        []string          `json:"stop,omitempty"`
-	Tools       []OpenAITool      `json:"tools,omitempty"`
-	ToolChoice  any               `json:"tool_choice,omitempty"`
+	Model             string               `json:"model"`
+	Messages          []OpenAIMessage      `json:"messages"`
+	MaxTokens         *int                 `json:"max_tokens,omitempty"`
+	Temperature       *float64             `json:"temperature,omitempty"`
+	TopP              *float64             `json:"top_p,omitempty"`
+	Stream            bool                 `json:"stream,omitempty"`
+	StreamOptions     *OpenAIStreamOptions `json:"stream_options,omitempty"`
+	Stop              []string             `json:"stop,omitempty"`
+	Tools             []OpenAITool         `json:"tools,omitempty"`
+	ToolChoice        any                  `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool                `json:"parallel_tool_calls,omitempty"`
 }
 
 // OpenAIStreamOptions asks the upstream to include usage in the final chunk.
@@ -24,19 +25,19 @@ type OpenAIStreamOptions struct {
 
 // OpenAIMessage is one chat message.
 type OpenAIMessage struct {
-	Role             string             `json:"role"`
-	Content          any                `json:"content,omitempty"` // string or []OpenAIContentPart
-	ReasoningContent string             `json:"reasoning_content,omitempty"`
-	ToolCalls        []OpenAIToolCall   `json:"tool_calls,omitempty"`
-	ToolCallID       string             `json:"tool_call_id,omitempty"`
-	Name             string             `json:"name,omitempty"`
+	Role             string           `json:"role"`
+	Content          any              `json:"content,omitempty"` // string or []OpenAIContentPart
+	ReasoningContent string           `json:"reasoning_content,omitempty"`
+	ToolCalls        []OpenAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string           `json:"tool_call_id,omitempty"`
+	Name             string           `json:"name,omitempty"`
 }
 
 // OpenAIContentPart is one part of a multi-part message (images / text).
 type OpenAIContentPart struct {
-	Type     string                  `json:"type"`
-	Text     string                  `json:"text,omitempty"`
-	ImageURL *OpenAIImageURL         `json:"image_url,omitempty"`
+	Type     string          `json:"type"`
+	Text     string          `json:"text,omitempty"`
+	ImageURL *OpenAIImageURL `json:"image_url,omitempty"`
 }
 
 // OpenAIImageURL wraps the url (data: or http(s):).
@@ -76,19 +77,19 @@ type OpenAIToolFunction struct {
 
 // OpenAIStreamChunk is one SSE "data:" line from the upstream.
 type OpenAIStreamChunk struct {
-	ID      string             `json:"id"`
-	Object  string             `json:"object"`
-	Model   string             `json:"model"`
-	Choices []OpenAIChoice     `json:"choices"`
-	Usage   *OpenAIUsage       `json:"usage,omitempty"`
+	ID      string         `json:"id"`
+	Object  string         `json:"object"`
+	Model   string         `json:"model"`
+	Choices []OpenAIChoice `json:"choices"`
+	Usage   *OpenAIUsage   `json:"usage,omitempty"`
 }
 
 // OpenAIChoice is one choice in a chunk.
 type OpenAIChoice struct {
-	Index        int              `json:"index"`
-	Delta        OpenAIDelta      `json:"delta,omitempty"`
-	Message      *OpenAIMessage   `json:"message,omitempty"`
-	FinishReason *string          `json:"finish_reason"`
+	Index        int            `json:"index"`
+	Delta        OpenAIDelta    `json:"delta,omitempty"`
+	Message      *OpenAIMessage `json:"message,omitempty"`
+	FinishReason *string        `json:"finish_reason"`
 }
 
 // OpenAIDelta is the streaming delta.
@@ -101,9 +102,24 @@ type OpenAIDelta struct {
 
 // OpenAIUsage is the usage block.
 type OpenAIUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens        int                        `json:"prompt_tokens"`
+	CompletionTokens    int                        `json:"completion_tokens"`
+	TotalTokens         int                        `json:"total_tokens"`
+	PromptTokensDetails *OpenAIPromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+}
+
+// OpenAIPromptTokensDetails carries provider prompt-cache accounting when an
+// OpenAI-compatible upstream exposes it.
+type OpenAIPromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens,omitempty"`
+}
+
+// CachedPromptTokens returns the cached-token count reported by the upstream.
+func (u OpenAIUsage) CachedPromptTokens() int {
+	if u.PromptTokensDetails == nil {
+		return 0
+	}
+	return u.PromptTokensDetails.CachedTokens
 }
 
 // ---- Non-streaming response ----
@@ -117,8 +133,8 @@ type OpenAIResponse struct {
 
 // OpenAIModelList is /v1/models.
 type OpenAIModelList struct {
-	Object string         `json:"object"`
-	Data   []OpenAIModel  `json:"data"`
+	Object string        `json:"object"`
+	Data   []OpenAIModel `json:"data"`
 }
 
 // OpenAIModel is one entry in the model list.

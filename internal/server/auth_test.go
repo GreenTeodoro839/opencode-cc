@@ -102,6 +102,38 @@ func TestClientAuthUsesOpenAIErrorForChatCompletions(t *testing.T) {
 	}
 }
 
+func TestClientAuthUsesOpenAIErrorForResponses(t *testing.T) {
+	cfg := config.Default()
+	cfg.RequireAPIKey = true
+	st, err := store.Open(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	New(cfg, st).clientAuth(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("protected handler was called")
+	})).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Error.Type != "authentication_error" || body.Type != "" {
+		t.Fatalf("unexpected error shape: %s", rec.Body.String())
+	}
+}
+
 func TestClientIPDoesNotTrustForwardedHeaderFromRemotePeer(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "203.0.113.10:4321"

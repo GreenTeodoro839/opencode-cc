@@ -6,17 +6,17 @@ package proxy
 
 // AnthropicRequest is the body of POST /v1/messages.
 type AnthropicRequest struct {
-	Model     string                 `json:"model"`
-	Messages  []AnthropicMessage     `json:"messages"`
-	System    AnthropicSystem        `json:"system,omitempty"`
-	MaxTokens int                    `json:"max_tokens"`
-	Temperature *float64             `json:"temperature,omitempty"`
-	TopP      *float64               `json:"top_p,omitempty"`
-	TopK      *int                   `json:"top_k,omitempty"`
-	Stop      []string               `json:"stop_sequences,omitempty"`
-	Stream    bool                   `json:"stream,omitempty"`
-	Tools     []AnthropicTool        `json:"tools,omitempty"`
-	ToolChoice AnthropicToolChoice   `json:"tool_choice,omitempty"`
+	Model       string              `json:"model"`
+	Messages    []AnthropicMessage  `json:"messages"`
+	System      AnthropicSystem     `json:"system,omitempty"`
+	MaxTokens   int                 `json:"max_tokens"`
+	Temperature *float64            `json:"temperature,omitempty"`
+	TopP        *float64            `json:"top_p,omitempty"`
+	TopK        *int                `json:"top_k,omitempty"`
+	Stop        []string            `json:"stop_sequences,omitempty"`
+	Stream      bool                `json:"stream,omitempty"`
+	Tools       []AnthropicTool     `json:"tools,omitempty"`
+	ToolChoice  AnthropicToolChoice `json:"tool_choice,omitempty"`
 	// Metadata and other rarely-used fields are ignored.
 }
 
@@ -59,15 +59,15 @@ func (s AnthropicSystem) MarshalJSON() ([]byte, error) {
 
 // AnthropicMessage is one message in the conversation.
 type AnthropicMessage struct {
-	Role    string               `json:"role"`
+	Role    string                  `json:"role"`
 	Content AnthropicMessageContent `json:"content"`
 }
 
 // AnthropicMessageContent is either a string or an array of content blocks.
 type AnthropicMessageContent struct {
-	Text   string              `json:"-"`
-	Blocks []AnthropicContent  `json:"-"`
-	IsStr  bool                `json:"-"`
+	Text   string             `json:"-"`
+	Blocks []AnthropicContent `json:"-"`
+	IsStr  bool               `json:"-"`
 }
 
 // UnmarshalJSON accepts string or array forms.
@@ -115,14 +115,14 @@ type AnthropicContent struct {
 	Source *AnthropicImageSource `json:"source,omitempty"`
 
 	// tool_use
-	ID    string          `json:"id,omitempty"`
-	Name  string          `json:"name,omitempty"`
-	Input jsonRawMessage  `json:"input,omitempty"`
+	ID    string         `json:"id,omitempty"`
+	Name  string         `json:"name,omitempty"`
+	Input jsonRawMessage `json:"input,omitempty"`
 
 	// tool_result
-	ToolUseID string                 `json:"tool_use_id,omitempty"`
+	ToolUseID string                   `json:"tool_use_id,omitempty"`
 	Content   *AnthropicMessageContent `json:"content,omitempty"`
-	IsError   bool                   `json:"is_error,omitempty"`
+	IsError   bool                     `json:"is_error,omitempty"`
 
 	// thinking (extended) — passed through as-is via Raw when present
 	Thinking string `json:"thinking,omitempty"`
@@ -158,20 +158,22 @@ type AnthropicToolChoice struct {
 
 // AnthropicResponse is the body of a non-streaming /v1/messages response.
 type AnthropicResponse struct {
-	ID           string                  `json:"id"`
-	Type         string                  `json:"type"`
-	Role         string                  `json:"role"`
-	Model        string                  `json:"model"`
-	Content      []AnthropicContent      `json:"content"`
-	StopReason   *string                 `json:"stop_reason"`
-	StopSequence *string                 `json:"stop_sequence,omitempty"`
-	Usage        AnthropicUsage          `json:"usage"`
+	ID           string             `json:"id"`
+	Type         string             `json:"type"`
+	Role         string             `json:"role"`
+	Model        string             `json:"model"`
+	Content      []AnthropicContent `json:"content"`
+	StopReason   *string            `json:"stop_reason"`
+	StopSequence *string            `json:"stop_sequence,omitempty"`
+	Usage        AnthropicUsage     `json:"usage"`
 }
 
 // AnthropicUsage is the usage block.
 type AnthropicUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 }
 
 // CountTokensResponse is returned by /v1/messages/count_tokens.

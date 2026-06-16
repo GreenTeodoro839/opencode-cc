@@ -49,6 +49,8 @@ Each protocol implements the `TranslateRequest`, `TranslateResponse`, and `Trans
 - **OpenAI client compatibility.** Supports `POST /v1/chat/completions` and an OpenAI-compatible `/v1/models`
   response, allowing OpenAI SDKs and compatible desktop clients to connect directly. The OpenAI path passes through
   Zen's native `/go/v1/chat/completions` JSON/SSE response without converting it to Anthropic format.
+- **Codex CLI compatibility.** Exposes `POST /v1/responses` and translates Codex Responses API requests, streaming
+  text events, and function calls to and from Zen's `/go/v1/chat/completions`, including multi-turn tool execution.
 - **A built-in catalog of 49 models.** The Models page displays pricing, context limits, capability tags, and protocol
   badges. Models can be added to mappings directly from the Config page.
 - **A single static binary.** The React SPA is embedded with `embed.FS`, so Node.js is not required at runtime.
@@ -113,6 +115,42 @@ curl http://localhost:8787/v1/chat/completions \
   -d '{"model":"glm-5.1","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
+### Connect Codex CLI
+
+Codex custom provider settings must be placed in the user-level configuration file:
+
+- Linux/macOS: `~/.codex/config.toml`
+- Windows: `%USERPROFILE%\.codex\config.toml`
+
+```toml
+model = "kimi-k2.7-code"
+model_provider = "opencode_cc"
+
+[model_providers.opencode_cc]
+name = "opencode-cc"
+base_url = "http://localhost:8787/v1"
+env_key = "OPENCODE_CC_API_KEY"
+wire_api = "responses"
+```
+
+Set the client key before starting Codex. Any non-empty value works when client API key authentication is disabled;
+otherwise use a key created in the dashboard:
+
+```bash
+export OPENCODE_CC_API_KEY=local
+codex
+```
+
+PowerShell:
+
+```powershell
+$env:OPENCODE_CC_API_KEY = "local"
+codex
+```
+
+`model` may be a real Zen model ID or an alias configured in the dashboard. `kimi-k2.7-code` is the recommended
+coding-oriented model.
+
 ### Development Mode with HMR
 
 ```bash
@@ -157,11 +195,14 @@ Zen exposes a native Anthropic Messages API for Claude and Qwen models. The prox
 request body, response body, and SSE stream are forwarded unchanged. This is the simplest path and requires no tool-call
 translation.
 
-### Anthropic ↔ Responses for GPT
+### Codex Responses ↔ OpenAI Chat
 
-Anthropic `messages[]` are translated into a Responses API `input` array containing `message`, `function_call`, and
-`function_call_output` item types. Streaming events such as `response.output_text.delta` and
-`response.function_call_arguments.delta` are translated into Anthropic `content_block_delta` events.
+For `/v1/responses`, the proxy converts Codex `instructions`, `input[]`, `function_call`,
+`function_call_output`, and function tools into OpenAI Chat Completions messages. Text deltas, streamed
+`tool_calls` arguments, and usage from Zen are rebuilt as standard Responses events such as
+`response.output_text.delta`, `response.function_call_arguments.delta`, and `response.completed`.
+
+This compatibility layer runs locally in the proxy and does not require a native `/v1/responses` endpoint upstream.
 
 ### Anthropic ↔ Google for Gemini
 
@@ -204,6 +245,7 @@ unchanged.
 | POST | `/v1/messages` | `stream:true` returns SSE; `stream:false` returns JSON |
 | POST | `/v1/messages/count_tokens` | Best-effort token estimation |
 | POST | `/v1/chat/completions` | OpenAI Chat Completions with streaming and non-streaming support |
+| POST | `/v1/responses` | OpenAI Responses API for Codex CLI, including streaming text and function calls |
 | GET | `/v1/models` | Model list compatible with both OpenAI and Anthropic clients |
 | GET | `/healthz` | Liveness probe |
 

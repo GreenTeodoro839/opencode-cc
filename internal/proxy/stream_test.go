@@ -209,4 +209,32 @@ func TestRequestConversionDisablesToolsWhenNoneDeclared(t *testing.T) {
 	}
 }
 
+func TestRequestConversionCanonicalizesToolJSON(t *testing.T) {
+	in := &AnthropicRequest{
+		Model:     "deepseek-v4-flash",
+		MaxTokens: 256,
+		Tools: []AnthropicTool{{
+			Name:        "run",
+			InputSchema: jsonRawMessage(`{"properties":{"z":{"type":"string"},"a":{"type":"number"}},"type":"object"}`),
+		}},
+		Messages: []AnthropicMessage{{
+			Role: "assistant",
+			Content: AnthropicMessageContent{Blocks: []AnthropicContent{{
+				Type:  "tool_use",
+				ID:    "call_1",
+				Name:  "run",
+				Input: jsonRawMessage(`{"z":2,"a":1}`),
+			}}},
+		}},
+	}
+
+	out := ConvertRequest(in, func(model string) string { return model })
+	if got := string(out.Tools[0].Function.Parameters); got != `{"properties":{"a":{"type":"number"},"z":{"type":"string"}},"type":"object"}` {
+		t.Fatalf("schema was not canonicalized: %s", got)
+	}
+	if got := out.Messages[0].ToolCalls[0].Function.Arguments; got != `{"a":1,"z":2}` {
+		t.Fatalf("tool arguments were not canonicalized: %s", got)
+	}
+}
+
 func strPtr(s string) *string { return &s }

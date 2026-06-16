@@ -47,6 +47,9 @@ func (s *Server) Handler(panelAssets http.FileSystem, panelMux http.Handler) htt
 	// OpenAI-compatible clients can use the same server directly. Requests are
 	// forwarded to Zen after applying the configured model mapping.
 	mux.Handle("/v1/chat/completions", s.clientAuth(s.OpenAIProxy()))
+	// Codex uses the Responses API. Zen /go only exposes Chat Completions, so
+	// this route performs a bidirectional Responses <-> Chat translation.
+	mux.Handle("/v1/responses", s.clientAuth(s.ResponsesProxy()))
 	mux.Handle("/v1/models", s.clientAuth(proxy.ModelsHandler(
 		s.httpClient,
 		func() string { return s.cfg.Snapshot().UpstreamBase },

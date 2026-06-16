@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 )
 
 // ConvertRequest turns an Anthropic Messages request into an OpenAI Chat
@@ -278,11 +279,11 @@ func compactJSON(raw jsonRawMessage) string {
 	if len(raw) == 0 {
 		return "{}"
 	}
-	var buf bytes.Buffer
-	if err := json.Compact(&buf, raw); err != nil {
+	canonical, ok := canonicalJSON(raw)
+	if !ok {
 		return string(raw)
 	}
-	return buf.String()
+	return string(canonical)
 }
 
 // ensureObjectSchema guarantees the schema is a JSON object (the OpenAI spec
@@ -291,15 +292,37 @@ func ensureObjectSchema(raw jsonRawMessage) jsonRawMessage {
 	if len(raw) == 0 {
 		return jsonRawMessage(`{"type":"object"}`)
 	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
 	var probe map[string]any
-	if err := json.Unmarshal(raw, &probe); err != nil {
+	if err := decoder.Decode(&probe); err != nil {
 		// Not valid JSON; hand back a minimal object to be safe.
 		return jsonRawMessage(`{"type":"object"}`)
 	}
 	if _, ok := probe["type"]; !ok {
 		probe["type"] = "object"
-		b, _ := json.Marshal(probe)
-		return b
 	}
-	return raw
+	b, err := json.Marshal(probe)
+	if err != nil {
+		return jsonRawMessage(`{"type":"object"}`)
+	}
+	return b
+}
+
+func canonicalJSON(raw jsonRawMessage) (jsonRawMessage, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, false
+	}
+	out, err := json.Marshal(value)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
 }

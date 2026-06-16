@@ -16,8 +16,9 @@ func ConvertResponse(in *OpenAIResponse, requestModel string) *AnthropicResponse
 		Role:  "assistant",
 		Model: requestModel,
 		Usage: AnthropicUsage{
-			InputTokens:  in.Usage.PromptTokens,
-			OutputTokens: in.Usage.CompletionTokens,
+			InputTokens:          in.Usage.PromptTokens,
+			OutputTokens:         in.Usage.CompletionTokens,
+			CacheReadInputTokens: in.Usage.CachedPromptTokens(),
 		},
 	}
 
