@@ -4,6 +4,8 @@ import {
   HourPoint,
   Latency,
   ModelUsagePoint,
+  OpenCodeGoQuotaAccount,
+  OpenCodeGoQuotaWindow,
   Summary,
 } from "../lib/api";
 import { fmtMs, fmtNum } from "../lib/format";
@@ -16,10 +18,26 @@ export default function Dashboard() {
   const [hourly, setHourly] = useState<HourPoint[]>([]);
   const [latency, setLatency] = useState<Latency | null>(null);
   const [models, setModels] = useState<ModelUsagePoint[]>([]);
+  const [goQuota, setGoQuota] = useState<OpenCodeGoQuotaAccount[]>([]);
+  const [goQuotaLoading, setGoQuotaLoading] = useState(false);
+  const [goQuotaErr, setGoQuotaErr] = useState("");
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string>("");
 
-  async function refresh() {
+  async function refreshQuota() {
+    setGoQuotaLoading(true);
+    try {
+      const quota = await api.opencodeGoQuota();
+      setGoQuota(quota);
+      setGoQuotaErr("");
+    } catch (e) {
+      setGoQuotaErr((e as Error).message);
+    } finally {
+      setGoQuotaLoading(false);
+    }
+  }
+
+  async function refreshStats() {
     try {
       const [s, h, l, m] = await Promise.all([
         api.summary(),
@@ -39,10 +57,20 @@ export default function Dashboard() {
     }
   }
 
+  async function refresh() {
+    refreshStats();
+    refreshQuota();
+  }
+
   useEffect(() => {
-    refresh();
-    const id = setInterval(refresh, 8000);
-    return () => clearInterval(id);
+    refreshStats();
+    refreshQuota();
+    const statsID = setInterval(refreshStats, 8000);
+    const quotaID = setInterval(refreshQuota, 60000);
+    return () => {
+      clearInterval(statsID);
+      clearInterval(quotaID);
+    };
   }, []);
 
   if (loading && !summary) {
@@ -123,6 +151,37 @@ export default function Dashboard() {
         />
       </div>
 
+      {(goQuota.length > 0 || goQuotaErr) && (
+        <Card className="mb-6">
+          <div className="flex items-center justify-between gap-3 mb-4">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-200">OpenCode Go 额度</h3>
+              <p className="text-xs text-slate-500 mt-1">
+                来自账号 Dashboard 的 5h、周限、月限百分比。
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              {goQuotaLoading && <Spinner className="text-slate-500" />}
+              <Badge tone={goQuota.some((q) => q.success) ? "green" : "amber"}>
+                {goQuota.length} 个账号
+              </Badge>
+            </div>
+          </div>
+
+          {goQuotaErr && (
+            <div className="mb-3 rounded-xl border border-accent-red/20 bg-accent-red/10 px-3 py-2 text-xs text-accent-red">
+              额度接口失败：{goQuotaErr}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+            {goQuota.map((account) => (
+              <QuotaAccountCard key={`${account.index}-${account.base_url}`} account={account} />
+            ))}
+          </div>
+        </Card>
+      )}
+
       {/* Charts */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-6">
         <Card>
@@ -192,6 +251,95 @@ export default function Dashboard() {
       </Card>
     </div>
   );
+}
+
+function QuotaAccountCard({ account }: { account: OpenCodeGoQuotaAccount }) {
+  const title = account.name || `账号 #${account.index + 1}`;
+  return (
+    <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-4">
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div className="min-w-0">
+          <div className="text-sm font-medium text-slate-200 truncate">{title}</div>
+          <div className="text-xs text-slate-500 font-mono truncate">{account.base_url}</div>
+        </div>
+        <Badge tone={account.success ? "green" : "red"}>
+          {account.success ? "已更新" : "失败"}
+        </Badge>
+      </div>
+
+      {!account.success ? (
+        <div className="rounded-lg border border-accent-red/20 bg-accent-red/10 px-3 py-2 text-xs text-accent-red">
+          {account.error || "额度查询失败"}
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {(account.windows || []).map((win) => (
+            <QuotaWindowBar key={win.label} win={win} />
+          ))}
+          {(!account.windows || account.windows.length === 0) && (
+            <div className="text-xs text-slate-500">没有启用的额度窗口。</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function QuotaWindowBar({ win }: { win: OpenCodeGoQuotaWindow }) {
+  const used = Math.max(0, Math.min(100, win.used));
+  const tone =
+    used >= 90
+      ? "from-accent-red to-accent-red/70"
+      : used >= 70
+      ? "from-accent-amber to-accent-amber/70"
+      : "from-accent-green to-accent-green/70";
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-3 mb-1.5">
+        <span className="text-xs font-medium text-slate-300">{quotaLabel(win.label)}</span>
+        <span className={`text-xs font-semibold tabular-nums ${quotaTextColor(used)}`}>
+          {used.toFixed(0)}%
+        </span>
+      </div>
+      <div className="h-2 rounded-full bg-white/[0.06] overflow-hidden">
+        <div
+          className={`h-full rounded-full bg-gradient-to-r ${tone} transition-all`}
+          style={{ width: `${used}%` }}
+        />
+      </div>
+      <div className="flex items-center justify-between mt-1 text-[11px] text-slate-500">
+        <span>剩余 {win.remaining.toFixed(0)}%</span>
+        <span title={new Date(win.reset_at).toLocaleString()}>
+          {formatReset(win.reset_at)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function quotaLabel(label: string): string {
+  if (label === "5h Rolling") return "5h 限制";
+  if (label === "Weekly") return "周限";
+  if (label === "Monthly") return "月限";
+  return label;
+}
+
+function quotaTextColor(used: number): string {
+  if (used >= 90) return "text-accent-red";
+  if (used >= 70) return "text-accent-amber";
+  return "text-accent-green";
+}
+
+function formatReset(iso: string): string {
+  const diffMs = new Date(iso).getTime() - Date.now();
+  if (!Number.isFinite(diffMs) || diffMs <= 0) return "即将重置";
+  const totalMinutes = Math.floor(diffMs / 60000);
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+  if (days > 0) return `重置 ${days}d${hours}h`;
+  if (hours > 0) return `重置 ${hours}h${minutes}m`;
+  return `重置 ${minutes}m`;
 }
 
 function RefreshIcon() {

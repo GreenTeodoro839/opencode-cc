@@ -60,6 +60,12 @@ export interface UpstreamView {
   api_key_set: boolean;
   name: string;
   enabled: boolean;
+  opencode_go_workspace_id?: string;
+  opencode_go_auth_cookie_masked?: string;
+  opencode_go_auth_cookie_set?: boolean;
+  opencode_go_show_rolling?: boolean;
+  opencode_go_show_weekly?: boolean;
+  opencode_go_show_monthly?: boolean;
 }
 
 export interface PanelConfig {
@@ -146,6 +152,27 @@ export interface AuthCheckResult {
   authenticated: boolean;
 }
 
+export interface OpenCodeGoQuotaWindow {
+  label: string;
+  used: number;
+  remaining: number;
+  total: number;
+  unit: string;
+  reset_at: string;
+  reset_in_sec: number;
+}
+
+export interface OpenCodeGoQuotaAccount {
+  index: number;
+  name: string;
+  base_url: string;
+  enabled: boolean;
+  success: boolean;
+  error?: string;
+  windows?: OpenCodeGoQuotaWindow[];
+  updated_at: string;
+}
+
 async function asJson<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const t = await res.text().catch(() => res.statusText);
@@ -167,6 +194,8 @@ export const api = {
   models: (hours = 24) =>
     fetch(`/api/stats/models?hours=${hours}`).then((r) => asArray<ModelUsagePoint>(r)),
   latency: () => fetch("/api/stats/latency").then((r) => asJson<Latency>(r)),
+  opencodeGoQuota: () =>
+    fetch("/api/opencode-go/quota").then((r) => asArray<OpenCodeGoQuotaAccount>(r)),
   logs: (limit = 100) =>
     fetch(`/api/logs?limit=${limit}`).then((r) => asArray<LogRow>(r)),
   log: (id: number) => fetch(`/api/logs/${id}`).then((r) => asJson<LogRow>(r)),

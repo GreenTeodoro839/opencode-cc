@@ -90,6 +90,9 @@ func TestMigrateLegacyUpstream(t *testing.T) {
 	if u.BaseURL != "https://opencode.ai/zen/go" || u.APIKey != "sk-test" || !u.Enabled {
 		t.Errorf("migrated upstream wrong: %+v", u)
 	}
+	if u.OpenCodeGoWorkspaceID != DefaultOpenCodeGoWorkspaceID {
+		t.Errorf("migrated OpenCode Go workspace = %q, want %q", u.OpenCodeGoWorkspaceID, DefaultOpenCodeGoWorkspaceID)
+	}
 
 	// Idempotent: running again must not duplicate.
 	c.migrateLegacyUpstream()
@@ -109,5 +112,102 @@ func TestMigrateLegacyUpstreamSkipsWhenPoolPresent(t *testing.T) {
 	c.migrateLegacyUpstream()
 	if len(c.Upstreams) != 1 || c.Upstreams[0].BaseURL != "https://pool.example" {
 		t.Errorf("pool clobbered by migration: %+v", c.Upstreams)
+	}
+}
+
+func TestApplyPatchPreservesOpenCodeGoQuotaSecretsAndVisibility(t *testing.T) {
+	showRolling := true
+	showWeekly := false
+	showMonthly := true
+	c := Default()
+	c.Upstreams = []Upstream{{
+		BaseURL:               "https://old.example/",
+		APIKey:                "old-api-key",
+		Enabled:               true,
+		OpenCodeGoWorkspaceID: "old-workspace",
+		OpenCodeGoAuthCookie:  "auth=old-cookie",
+		OpenCodeGoShowRolling: &showRolling,
+		OpenCodeGoShowWeekly:  &showWeekly,
+		OpenCodeGoShowMonthly: &showMonthly,
+	}}
+
+	next := []Upstream{{
+		BaseURL:               "https://new.example/",
+		APIKey:                "",
+		Enabled:               true,
+		OpenCodeGoWorkspaceID: " new-workspace ",
+		OpenCodeGoAuthCookie:  "",
+	}}
+	c.ApplyPatch(&Patch{Upstreams: &next})
+
+	got := c.Snapshot().Upstreams[0]
+	if got.APIKey != "old-api-key" {
+		t.Fatalf("API key was not preserved: %+v", got)
+	}
+	if got.OpenCodeGoAuthCookie != "auth=old-cookie" {
+		t.Fatalf("OpenCode Go cookie was not preserved: %+v", got)
+	}
+	if got.OpenCodeGoWorkspaceID != "new-workspace" {
+		t.Fatalf("workspace was not trimmed/updated: %+v", got)
+	}
+	if got.OpenCodeGoShowRolling == nil || *got.OpenCodeGoShowRolling != true ||
+		got.OpenCodeGoShowWeekly == nil || *got.OpenCodeGoShowWeekly != false ||
+		got.OpenCodeGoShowMonthly == nil || *got.OpenCodeGoShowMonthly != true {
+		t.Fatalf("OpenCode Go visibility flags were not preserved: %+v", got)
+	}
+}
+
+func TestApplyPatchDefaultsEmptyOpenCodeGoWorkspace(t *testing.T) {
+	c := Default()
+	next := []Upstream{{
+		BaseURL:               "https://pool.example/",
+		APIKey:                "pk",
+		Enabled:               true,
+		OpenCodeGoWorkspaceID: " ",
+		OpenCodeGoAuthCookie:  "auth=cookie",
+	}}
+
+	c.ApplyPatch(&Patch{Upstreams: &next})
+	got := c.Snapshot().Upstreams[0]
+	if got.OpenCodeGoWorkspaceID != DefaultOpenCodeGoWorkspaceID {
+		t.Fatalf("workspace = %q, want %q", got.OpenCodeGoWorkspaceID, DefaultOpenCodeGoWorkspaceID)
+	}
+}
+
+func TestSnapshotDeepCopiesOpenCodeGoVisibilityPointers(t *testing.T) {
+	showRolling := true
+	c := Default()
+	c.Upstreams = []Upstream{{
+		BaseURL:               "https://pool.example",
+		APIKey:                "pk",
+		Enabled:               true,
+		OpenCodeGoShowRolling: &showRolling,
+	}}
+
+	snap := c.Snapshot()
+	*snap.Upstreams[0].OpenCodeGoShowRolling = false
+
+	got := c.Snapshot().Upstreams[0]
+	if got.OpenCodeGoShowRolling == nil || *got.OpenCodeGoShowRolling != true {
+		t.Fatalf("snapshot mutation leaked into config: %+v", got)
+	}
+}
+
+func TestApplyPatchDeepCopiesOpenCodeGoVisibilityPointers(t *testing.T) {
+	showRolling := true
+	c := Default()
+	next := []Upstream{{
+		BaseURL:               "https://pool.example",
+		APIKey:                "pk",
+		Enabled:               true,
+		OpenCodeGoShowRolling: &showRolling,
+	}}
+
+	c.ApplyPatch(&Patch{Upstreams: &next})
+	showRolling = false
+
+	got := c.Snapshot().Upstreams[0]
+	if got.OpenCodeGoShowRolling == nil || *got.OpenCodeGoShowRolling != true {
+		t.Fatalf("patch pointer mutation leaked into config: %+v", got)
 	}
 }

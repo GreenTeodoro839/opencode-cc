@@ -84,6 +84,7 @@ func (a *API) Mount(mux *http.ServeMux) {
 	mux.Handle("/api/stats/hourly", a.auth(http.HandlerFunc(a.hourly)))
 	mux.Handle("/api/stats/models", a.auth(http.HandlerFunc(a.modelUsage)))
 	mux.Handle("/api/stats/latency", a.auth(http.HandlerFunc(a.latency)))
+	mux.Handle("/api/opencode-go/quota", a.auth(http.HandlerFunc(a.opencodeGoQuota)))
 	mux.Handle("/api/logs", a.auth(http.HandlerFunc(a.logs)))
 	mux.Handle("/api/logs/", a.auth(http.HandlerFunc(a.logDetail)))
 	mux.Handle("/api/keys", a.auth(http.HandlerFunc(a.keysHandler)))
@@ -286,11 +287,17 @@ func publicConfig(c *config.Config) map[string]any {
 	upstreamsView := make([]map[string]any, 0, len(c.Upstreams))
 	for _, u := range c.Upstreams {
 		upstreamsView = append(upstreamsView, map[string]any{
-			"base_url":       u.BaseURL,
-			"api_key_masked": maskKey(u.APIKey),
-			"api_key_set":    u.APIKey != "",
-			"name":           u.Name,
-			"enabled":        u.Enabled,
+			"base_url":                       u.BaseURL,
+			"api_key_masked":                 maskKey(u.APIKey),
+			"api_key_set":                    u.APIKey != "",
+			"name":                           u.Name,
+			"enabled":                        u.Enabled,
+			"opencode_go_workspace_id":       u.OpenCodeGoWorkspaceID,
+			"opencode_go_auth_cookie_masked": maskLongSecret(u.OpenCodeGoAuthCookie),
+			"opencode_go_auth_cookie_set":    u.OpenCodeGoAuthCookie != "",
+			"opencode_go_show_rolling":       boolDefault(u.OpenCodeGoShowRolling, true),
+			"opencode_go_show_weekly":        boolDefault(u.OpenCodeGoShowWeekly, true),
+			"opencode_go_show_monthly":       boolDefault(u.OpenCodeGoShowMonthly, true),
 		})
 	}
 	return map[string]any{
@@ -325,6 +332,16 @@ func maskKey(key string) string {
 		return strings.Repeat("*", len(key))
 	}
 	return key[:4] + strings.Repeat("*", len(key)-8) + key[len(key)-4:]
+}
+
+func maskLongSecret(secret string) string {
+	if secret == "" {
+		return ""
+	}
+	if len(secret) <= 12 {
+		return strings.Repeat("*", len(secret))
+	}
+	return secret[:4] + "…" + secret[len(secret)-4:]
 }
 
 // summary returns lifetime + last-24h aggregate numbers.

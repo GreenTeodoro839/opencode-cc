@@ -12,12 +12,20 @@ interface UpstreamRow {
   enabled: boolean;
   api_key_set: boolean;
   api_key_masked: string;
+  opencode_go_workspace_id: string;
+  opencode_go_auth_cookie: string;
+  opencode_go_auth_cookie_set: boolean;
+  opencode_go_auth_cookie_masked: string;
+  opencode_go_show_rolling: boolean;
+  opencode_go_show_weekly: boolean;
+  opencode_go_show_monthly: boolean;
 }
 
 const ZEN_BASES = [
   "https://opencode.ai/zen/go",
   "https://opencode.ai/zen/",
 ];
+const DEFAULT_OPENCODE_GO_WORKSPACE = "Default";
 
 export default function Settings() {
   const [cfg, setCfg] = useState<PanelConfig | null>(null);
@@ -61,6 +69,13 @@ export default function Settings() {
         enabled: u.enabled,
         api_key_set: u.api_key_set,
         api_key_masked: u.api_key_masked,
+        opencode_go_workspace_id: u.opencode_go_workspace_id || DEFAULT_OPENCODE_GO_WORKSPACE,
+        opencode_go_auth_cookie: "",
+        opencode_go_auth_cookie_set: Boolean(u.opencode_go_auth_cookie_set),
+        opencode_go_auth_cookie_masked: u.opencode_go_auth_cookie_masked || "",
+        opencode_go_show_rolling: u.opencode_go_show_rolling !== false,
+        opencode_go_show_weekly: u.opencode_go_show_weekly !== false,
+        opencode_go_show_monthly: u.opencode_go_show_monthly !== false,
       }));
       setUpstreams(rows);
     });
@@ -106,6 +121,12 @@ export default function Settings() {
           api_key: u.api_key.trim(),
           name: u.name,
           enabled: u.enabled,
+          opencode_go_workspace_id: u.opencode_go_workspace_id.trim() || DEFAULT_OPENCODE_GO_WORKSPACE,
+          // empty cookie = keep existing (backend sentinel); only send typed value
+          opencode_go_auth_cookie: u.opencode_go_auth_cookie.trim(),
+          opencode_go_show_rolling: u.opencode_go_show_rolling,
+          opencode_go_show_weekly: u.opencode_go_show_weekly,
+          opencode_go_show_monthly: u.opencode_go_show_monthly,
         })),
       };
       const updated = await api.putConfig(body);
@@ -120,6 +141,13 @@ export default function Settings() {
             enabled: u.enabled,
             api_key_set: u.api_key_set,
             api_key_masked: u.api_key_masked,
+            opencode_go_workspace_id: u.opencode_go_workspace_id || DEFAULT_OPENCODE_GO_WORKSPACE,
+            opencode_go_auth_cookie: "",
+            opencode_go_auth_cookie_set: Boolean(u.opencode_go_auth_cookie_set),
+            opencode_go_auth_cookie_masked: u.opencode_go_auth_cookie_masked || "",
+            opencode_go_show_rolling: u.opencode_go_show_rolling !== false,
+            opencode_go_show_weekly: u.opencode_go_show_weekly !== false,
+            opencode_go_show_monthly: u.opencode_go_show_monthly !== false,
           }))
         );
       }
@@ -139,7 +167,21 @@ export default function Settings() {
   function addUpstream() {
     setUpstreams((prev) => [
       ...prev,
-      { base_url: ZEN_BASES[0], api_key: "", name: "", enabled: true, api_key_set: false, api_key_masked: "" },
+      {
+        base_url: ZEN_BASES[0],
+        api_key: "",
+        name: "",
+        enabled: true,
+        api_key_set: false,
+        api_key_masked: "",
+        opencode_go_workspace_id: DEFAULT_OPENCODE_GO_WORKSPACE,
+        opencode_go_auth_cookie: "",
+        opencode_go_auth_cookie_set: false,
+        opencode_go_auth_cookie_masked: "",
+        opencode_go_show_rolling: true,
+        opencode_go_show_weekly: true,
+        opencode_go_show_monthly: true,
+      },
     ]);
     setDirty(true);
   }
@@ -277,6 +319,74 @@ export default function Settings() {
                     </button>
                     <span className="text-xs text-slate-400">启用</span>
                   </label>
+                </div>
+
+                <div className="mt-3 rounded-xl border border-white/[0.04] bg-ink-950/30 p-3">
+                  <div className="flex items-center justify-between gap-3 mb-3">
+                    <div>
+                      <div className="text-xs font-medium text-slate-300">OpenCode Go 额度显示</div>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        填入 Workspace ID 与登录 Cookie 后，仪表盘会显示 5h、周限、月限。
+                      </p>
+                    </div>
+                    {u.opencode_go_workspace_id && (u.opencode_go_auth_cookie_set || u.opencode_go_auth_cookie.trim()) ? (
+                      <Badge tone="green">已配置</Badge>
+                    ) : (
+                      <Badge tone="amber">可选</Badge>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div>
+                      <label className="label">Workspace ID</label>
+                      <input
+                        className="input font-mono"
+                        placeholder={DEFAULT_OPENCODE_GO_WORKSPACE}
+                        value={u.opencode_go_workspace_id}
+                        onChange={(e) => updateUpstream(i, { opencode_go_workspace_id: e.target.value })}
+                      />
+                    </div>
+                    <div>
+                      <label className="label">
+                        Auth Cookie {u.opencode_go_auth_cookie_set ? "（已保存）" : ""}
+                      </label>
+                      <input
+                        type="password"
+                        className="input font-mono"
+                        placeholder={u.opencode_go_auth_cookie_set ? "留空保持不变，或输入新 Cookie 替换" : "auth=... 或 Cookie 值"}
+                        value={u.opencode_go_auth_cookie}
+                        onChange={(e) => updateUpstream(i, { opencode_go_auth_cookie: e.target.value })}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-slate-400">
+                    <span className="text-slate-500">显示窗口：</span>
+                    <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={u.opencode_go_show_rolling}
+                        onChange={(e) => updateUpstream(i, { opencode_go_show_rolling: e.target.checked })}
+                      />
+                      5h 限制
+                    </label>
+                    <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={u.opencode_go_show_weekly}
+                        onChange={(e) => updateUpstream(i, { opencode_go_show_weekly: e.target.checked })}
+                      />
+                      周限
+                    </label>
+                    <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={u.opencode_go_show_monthly}
+                        onChange={(e) => updateUpstream(i, { opencode_go_show_monthly: e.target.checked })}
+                      />
+                      月限
+                    </label>
+                  </div>
                 </div>
               </div>
             ))}
