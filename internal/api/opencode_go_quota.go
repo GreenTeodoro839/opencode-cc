@@ -84,11 +84,10 @@ func (a *API) opencodeGoQuota(w http.ResponseWriter, r *http.Request) {
 		if !up.Enabled {
 			continue
 		}
-		// Quota display is optional. If neither field is present, the upstream
-		// is simply not configured for quota display. If the user saved a cookie
-		// but left Workspace ID blank, OpenCode Go's dashboard default is
-		// /workspace/Default/go.
-		if workspaceID == "" && authCookie == "" {
+		// Quota display is optional and requires a browser auth cookie. Workspace
+		// ID may be defaulted by config migration/UI, so cookie presence is the
+		// real signal that quota display was configured.
+		if authCookie == "" {
 			continue
 		}
 		workspaceID = openCodeGoWorkspaceOrDefault(workspaceID)
@@ -100,12 +99,6 @@ func (a *API) opencodeGoQuota(w http.ResponseWriter, r *http.Request) {
 			Enabled:   up.Enabled,
 			UpdatedAt: now.Format(time.RFC3339),
 		}
-		if authCookie == "" {
-			account.Error = "OpenCode Go auth cookie is empty"
-			out = append(out, account)
-			continue
-		}
-
 		windows, err := fetchOpenCodeGoQuota(r.Context(), workspaceID, authCookie, now)
 		if err != nil {
 			account.Error = err.Error()

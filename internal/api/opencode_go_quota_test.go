@@ -1,6 +1,9 @@
 package api
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -101,5 +104,27 @@ func TestFilterOpenCodeGoWindowsRespectsVisibility(t *testing.T) {
 	})
 	if len(got) != 2 || got[0].Label != openCodeGoLabelRolling || got[1].Label != openCodeGoLabelMonthly {
 		t.Fatalf("filtered windows wrong: %#v", got)
+	}
+}
+
+func TestOpenCodeGoQuotaSkipsUpstreamsWithoutAuthCookie(t *testing.T) {
+	cfg := config.Default()
+	cfg.Upstreams = []config.Upstream{{
+		BaseURL:               "https://opencode.ai/zen/go",
+		APIKey:                "test-key",
+		Enabled:               true,
+		OpenCodeGoWorkspaceID: config.DefaultOpenCodeGoWorkspaceID,
+	}}
+	mux := newTestAPI(t, cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/opencode-go/quota", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if body := strings.TrimSpace(rec.Body.String()); body != "[]" {
+		t.Fatalf("body = %q, want []", body)
 	}
 }
