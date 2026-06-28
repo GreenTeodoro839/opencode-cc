@@ -174,6 +174,11 @@ type AnthropicContent struct {
 	// thinking (extended) — passed through as-is via Raw when present
 	Thinking string `json:"thinking,omitempty"`
 
+	// cache_control marks Anthropic prompt-cache boundaries. OpenAI-compatible
+	// upstreams do not understand it directly, but the converter uses it to
+	// choose a more precise prompt_cache_key.
+	CacheControl jsonRawMessage `json:"cache_control,omitempty"`
+
 	// Catch-all for anything we don't specifically model.
 	Raw jsonRawMessage `json:"-"`
 }
@@ -247,11 +252,12 @@ type AnthropicImageSource struct {
 
 // AnthropicTool is a tool definition.
 type AnthropicTool struct {
-	Type        string         `json:"type,omitempty"`
-	Name        string         `json:"name"`
-	Description string         `json:"description,omitempty"`
-	InputSchema jsonRawMessage `json:"input_schema"`
-	MaxUses     int            `json:"max_uses,omitempty"`
+	Type         string         `json:"type,omitempty"`
+	Name         string         `json:"name"`
+	Description  string         `json:"description,omitempty"`
+	InputSchema  jsonRawMessage `json:"input_schema"`
+	MaxUses      int            `json:"max_uses,omitempty"`
+	CacheControl jsonRawMessage `json:"cache_control,omitempty"`
 }
 
 // AnthropicToolChoice mirrors the tool_choice object.

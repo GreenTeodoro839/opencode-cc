@@ -203,6 +203,10 @@ func TestPromptCacheNormalizesRawOpenAIRequest(t *testing.T) {
 	if err := json.Unmarshal(payload["prompt_cache_key"], &key); err != nil || !strings.HasPrefix(key, "test:") {
 		t.Fatalf("prompt_cache_key = %q, err=%v", key, err)
 	}
+	var retention string
+	if err := json.Unmarshal(payload["prompt_cache_retention"], &retention); err != nil || retention != promptCacheRetention {
+		t.Fatalf("prompt_cache_retention = %q, err=%v", retention, err)
+	}
 	var metadata map[string]json.RawMessage
 	if err := json.Unmarshal(payload["metadata"], &metadata); err != nil {
 		t.Fatalf("metadata: %v", err)
@@ -286,6 +290,28 @@ func TestRawPromptCacheKeyUsesFirstMessagePrefix(t *testing.T) {
 	}
 	if first == other {
 		t.Fatalf("different first-message prefixes should not share the same key: %q", first)
+	}
+}
+
+func TestRawPromptCacheAddsRetentionWithProvidedKey(t *testing.T) {
+	payload := map[string]json.RawMessage{
+		"model":            json.RawMessage(`"target-model"`),
+		"prompt_cache_key": json.RawMessage(`"client-key"`),
+		"messages":         json.RawMessage(`[{"role":"user","content":"Question"}]`),
+	}
+
+	ApplyRawOpenAIPromptCache(payload, PromptCacheOptions{
+		Enabled:          true,
+		KeyPrefix:        "test",
+		NormalizePrompts: true,
+	})
+
+	if string(payload["prompt_cache_key"]) != `"client-key"` {
+		t.Fatalf("prompt_cache_key was overwritten: %s", payload["prompt_cache_key"])
+	}
+	var retention string
+	if err := json.Unmarshal(payload["prompt_cache_retention"], &retention); err != nil || retention != promptCacheRetention {
+		t.Fatalf("prompt_cache_retention = %q, err=%v", retention, err)
 	}
 }
 

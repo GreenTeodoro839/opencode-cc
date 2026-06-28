@@ -18,6 +18,10 @@ import (
 //
 // resolveModel is called to map the incoming model name to an upstream target.
 func ConvertRequest(in *AnthropicRequest, resolveModel func(string) string) *OpenAIRequest {
+	promptCacheHint := anthropicPromptCacheHint(in)
+	if promptCacheHint == "" {
+		promptCacheHint = anthropicCacheControlPromptCacheHint(in)
+	}
 	out := &OpenAIRequest{
 		Model:           resolveModel(in.Model),
 		Stream:          in.Stream,
@@ -25,7 +29,7 @@ func ConvertRequest(in *AnthropicRequest, resolveModel func(string) string) *Ope
 		MaxTokens:       &in.MaxTokens,
 		Temperature:     in.Temperature,
 		TopP:            in.TopP,
-		PromptCacheHint: anthropicPromptCacheHint(in),
+		PromptCacheHint: promptCacheHint,
 	}
 
 	// System prompt first, if present.

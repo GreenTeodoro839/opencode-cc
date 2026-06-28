@@ -18,7 +18,10 @@ type PromptCacheOptions struct {
 	NormalizePrompts      bool
 }
 
-const promptCacheFirstMessagePrefixBytes = 8192
+const (
+	promptCacheFirstMessagePrefixBytes = 8192
+	promptCacheRetention               = "24h"
+)
 
 // ApplyOpenAIPromptCache normalizes an OpenAI Chat request and sets a stable
 // prompt_cache_key when the caller did not provide one.
@@ -33,6 +36,9 @@ func ApplyOpenAIPromptCache(req *OpenAIRequest, opts PromptCacheOptions) {
 	if req.PromptCacheKey == "" {
 		req.PromptCacheKey = buildOpenAIPromptCacheKey(req, opts.KeyPrefix)
 	}
+	if req.PromptCacheRetention == "" {
+		req.PromptCacheRetention = promptCacheRetention
+	}
 }
 
 // ApplyRawOpenAIPromptCache normalizes a raw OpenAI-compatible request object
@@ -46,10 +52,12 @@ func ApplyRawOpenAIPromptCache(payload map[string]json.RawMessage, opts PromptCa
 		normalizeRawOpenAIMessages(payload)
 		removeVolatileMetadata(payload)
 	}
-	if raw := payload["prompt_cache_key"]; len(raw) > 0 && string(raw) != "null" {
-		return
+	if raw := payload["prompt_cache_key"]; len(raw) == 0 || string(raw) == "null" {
+		payload["prompt_cache_key"], _ = json.Marshal(buildRawPromptCacheKey(payload, opts.KeyPrefix))
 	}
-	payload["prompt_cache_key"], _ = json.Marshal(buildRawPromptCacheKey(payload, opts.KeyPrefix))
+	if raw := payload["prompt_cache_retention"]; len(raw) == 0 || string(raw) == "null" {
+		payload["prompt_cache_retention"], _ = json.Marshal(promptCacheRetention)
+	}
 }
 
 // PrepareAnthropicPromptCacheBody rewrites the target model and applies
@@ -230,6 +238,89 @@ func promptCacheHintFromObject(object map[string]json.RawMessage) string {
 		}
 	}
 	return ""
+}
+
+func anthropicCacheControlPromptCacheHint(in *AnthropicRequest) string {
+	if in == nil {
+		return ""
+	}
+	prefix, ok := anthropicCacheControlPrefix(in)
+	if !ok {
+		return ""
+	}
+	raw, err := json.Marshal(prefix)
+	if err != nil {
+		return ""
+	}
+	canonical, ok := canonicalJSON(raw)
+	if !ok {
+		canonical = raw
+	}
+	sum := sha256.Sum256(canonical)
+	return "cache-control:" + hex.EncodeToString(sum[:])[:20]
+}
+
+type anthropicCacheControlPrefixData struct {
+	Tools    []AnthropicTool    `json:"tools,omitempty"`
+	System   []AnthropicContent `json:"system,omitempty"`
+	Messages []AnthropicMessage `json:"messages,omitempty"`
+}
+
+func anthropicCacheControlPrefix(in *AnthropicRequest) (anthropicCacheControlPrefixData, bool) {
+	var prefix anthropicCacheControlPrefixData
+	found := false
+
+	for idx, tool := range in.Tools {
+		if hasCacheControl(tool.CacheControl) {
+			prefix = anthropicCacheControlPrefixData{
+				Tools: append([]AnthropicTool(nil), in.Tools[:idx+1]...),
+			}
+			found = true
+		}
+	}
+
+	for idx, block := range in.System.Blocks {
+		if hasCacheControl(block.CacheControl) {
+			prefix = anthropicCacheControlPrefixData{
+				Tools:  append([]AnthropicTool(nil), in.Tools...),
+				System: append([]AnthropicContent(nil), in.System.Blocks[:idx+1]...),
+			}
+			found = true
+		}
+	}
+
+	for msgIdx, msg := range in.Messages {
+		if msg.Content.IsStr {
+			continue
+		}
+		for blockIdx, block := range msg.Content.Blocks {
+			if !hasCacheControl(block.CacheControl) {
+				continue
+			}
+			messages := append([]AnthropicMessage(nil), in.Messages[:msgIdx]...)
+			truncated := msg
+			truncated.Content = AnthropicMessageContent{
+				Blocks: append([]AnthropicContent(nil), msg.Content.Blocks[:blockIdx+1]...),
+			}
+			messages = append(messages, truncated)
+			prefix = anthropicCacheControlPrefixData{
+				Tools:    append([]AnthropicTool(nil), in.Tools...),
+				System:   append([]AnthropicContent(nil), in.System.Blocks...),
+				Messages: messages,
+			}
+			found = true
+		}
+	}
+
+	return prefix, found
+}
+
+func hasCacheControl(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	text := strings.TrimSpace(string(raw))
+	return text != "" && text != "null"
 }
 
 func buildRawPromptCacheKey(payload map[string]json.RawMessage, prefix string) string {

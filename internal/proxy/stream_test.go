@@ -584,4 +584,72 @@ func TestPromptCacheKeyUsesFirstMessagePrefixWithoutSessionHint(t *testing.T) {
 	}
 }
 
+func TestPromptCacheKeyUsesAnthropicCacheControlBoundary(t *testing.T) {
+	cacheControl := jsonRawMessage(`{"type":"ephemeral"}`)
+	makeReq := func(cachedToolResult, laterText string) *OpenAIRequest {
+		out := ConvertRequest(&AnthropicRequest{
+			Model:     "claude-3-5-sonnet",
+			MaxTokens: 128,
+			System: AnthropicSystem{Blocks: []AnthropicContent{{
+				Type:         "text",
+				Text:         "Stable system",
+				CacheControl: cacheControl,
+			}}},
+			Messages: []AnthropicMessage{
+				{
+					Role: "user",
+					Content: AnthropicMessageContent{Blocks: []AnthropicContent{{
+						Type: "text",
+						Text: "Stable Claude Code context",
+					}}},
+				},
+				{
+					Role: "assistant",
+					Content: AnthropicMessageContent{Blocks: []AnthropicContent{{
+						Type:  "tool_use",
+						ID:    "toolu_read",
+						Name:  "Read",
+						Input: jsonRawMessage(`{"file_path":"/tmp/a.txt"}`),
+					}}},
+				},
+				{
+					Role: "user",
+					Content: AnthropicMessageContent{Blocks: []AnthropicContent{
+						{
+							Type:         "tool_result",
+							ToolUseID:    "toolu_read",
+							Content:      &AnthropicMessageContent{IsStr: true, Text: cachedToolResult},
+							CacheControl: cacheControl,
+						},
+						{Type: "text", Text: laterText},
+					}},
+				},
+			},
+		}, func(model string) string { return "glm-5.2" })
+		ApplyOpenAIPromptCache(out, PromptCacheOptions{
+			Enabled:          true,
+			KeyPrefix:        "test",
+			NormalizePrompts: true,
+		})
+		return out
+	}
+
+	first := makeReq("same cached file contents", "turn A")
+	second := makeReq("same cached file contents", "turn B")
+	other := makeReq("different cached file contents", "turn A")
+
+	if first.PromptCacheKey == "" {
+		t.Fatal("prompt_cache_key was not set")
+	}
+	if first.PromptCacheRetention != promptCacheRetention {
+		t.Fatalf("prompt_cache_retention = %q", first.PromptCacheRetention)
+	}
+	if first.PromptCacheKey != second.PromptCacheKey {
+		t.Fatalf("content after cache_control should not change key: %q vs %q", first.PromptCacheKey, second.PromptCacheKey)
+	}
+	if first.PromptCacheKey == other.PromptCacheKey {
+		t.Fatalf("different cache_control prefixes should not share the same key: %q", first.PromptCacheKey)
+	}
+}
+
 func strPtr(s string) *string { return &s }
