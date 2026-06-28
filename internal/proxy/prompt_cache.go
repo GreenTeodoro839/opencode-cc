@@ -18,6 +18,8 @@ type PromptCacheOptions struct {
 	NormalizePrompts      bool
 }
 
+const promptCacheFirstMessagePrefixBytes = 8192
+
 // ApplyOpenAIPromptCache normalizes an OpenAI Chat request and sets a stable
 // prompt_cache_key when the caller did not provide one.
 func ApplyOpenAIPromptCache(req *OpenAIRequest, opts PromptCacheOptions) {
@@ -111,7 +113,60 @@ func buildOpenAIPromptCacheKey(req *OpenAIRequest, prefix string) string {
 		}
 		parts = append(parts, msg.Role, msg.Content)
 	}
+	if req.PromptCacheHint == "" {
+		if first := firstOpenAIMessagePrefixForCache(req.Messages); first != "" {
+			parts = append(parts, "first_message_prefix", first)
+		}
+	}
 	return promptCacheKey(prefix, parts)
+}
+
+func firstOpenAIMessagePrefixForCache(messages []OpenAIMessage) string {
+	for _, msg := range messages {
+		if msg.Role == "system" || msg.Role == "developer" {
+			continue
+		}
+		prefix := contentPrefixForCache(msg.Content)
+		if prefix == "" {
+			return ""
+		}
+		return msg.Role + ":" + prefix
+	}
+	return ""
+}
+
+func contentPrefixForCache(value any) string {
+	switch v := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return truncateCachePrefix(v)
+	case []OpenAIContentPart:
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return ""
+		}
+		return truncateCachePrefix(string(raw))
+	default:
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return truncateCachePrefix(fmt.Sprint(v))
+		}
+		return truncateCachePrefix(string(raw))
+	}
+}
+
+func truncateCachePrefix(text string) string {
+	text = strings.TrimSpace(text)
+	if len(text) <= promptCacheFirstMessagePrefixBytes {
+		return text
+	}
+	for idx := range text {
+		if idx >= promptCacheFirstMessagePrefixBytes {
+			return text[:idx]
+		}
+	}
+	return text
 }
 
 func anthropicPromptCacheHint(in *AnthropicRequest) string {
@@ -194,9 +249,38 @@ func buildRawPromptCacheKey(payload map[string]json.RawMessage, prefix string) s
 				}
 				parts = append(parts, role, string(msg["content"]))
 			}
+			if first := firstRawOpenAIMessagePrefixForCache(messages); first != "" {
+				parts = append(parts, "first_message_prefix", first)
+			}
 		}
 	}
 	return promptCacheKey(prefix, parts)
+}
+
+func firstRawOpenAIMessagePrefixForCache(messages []map[string]json.RawMessage) string {
+	for _, msg := range messages {
+		role := rawString(msg["role"])
+		if role == "system" || role == "developer" {
+			continue
+		}
+		prefix := rawContentPrefixForCache(msg["content"])
+		if prefix == "" {
+			return ""
+		}
+		return role + ":" + prefix
+	}
+	return ""
+}
+
+func rawContentPrefixForCache(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return truncateCachePrefix(text)
+	}
+	return truncateCachePrefix(string(raw))
 }
 
 func promptCacheKey(prefix string, parts []any) string {

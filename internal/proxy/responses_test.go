@@ -251,6 +251,44 @@ func TestPromptCacheNormalizesRawOpenAIRequest(t *testing.T) {
 	}
 }
 
+func TestRawPromptCacheKeyUsesFirstMessagePrefix(t *testing.T) {
+	makeKey := func(userText string) string {
+		messages, err := json.Marshal([]map[string]any{
+			{"role": "user", "content": userText},
+			{"role": "developer", "content": "Stable rules"},
+		})
+		if err != nil {
+			t.Fatalf("messages: %v", err)
+		}
+		payload := map[string]json.RawMessage{
+			"model":    json.RawMessage(`"target-model"`),
+			"messages": json.RawMessage(messages),
+		}
+		ApplyRawOpenAIPromptCache(payload, PromptCacheOptions{
+			Enabled:          true,
+			KeyPrefix:        "test",
+			NormalizePrompts: true,
+		})
+		var key string
+		if err := json.Unmarshal(payload["prompt_cache_key"], &key); err != nil || key == "" {
+			t.Fatalf("prompt_cache_key = %q, err=%v", key, err)
+		}
+		return key
+	}
+
+	stablePrefix := strings.Repeat("stable raw OpenAI context\n", promptCacheFirstMessagePrefixBytes/26+2)
+	first := makeKey(stablePrefix + "turn A")
+	second := makeKey(stablePrefix + "turn B")
+	other := makeKey("different raw OpenAI context\n" + stablePrefix)
+
+	if first != second {
+		t.Fatalf("same first-message prefix should keep the same key: %q vs %q", first, second)
+	}
+	if first == other {
+		t.Fatalf("different first-message prefixes should not share the same key: %q", first)
+	}
+}
+
 func TestPrepareAnthropicPromptCacheBodyAddsCacheControl(t *testing.T) {
 	out, err := PrepareAnthropicPromptCacheBody([]byte(`{
 		"model":"client-model",

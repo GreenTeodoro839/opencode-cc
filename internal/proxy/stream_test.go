@@ -551,4 +551,37 @@ func TestPromptCacheKeyUsesClaudeSessionHint(t *testing.T) {
 	}
 }
 
+func TestPromptCacheKeyUsesFirstMessagePrefixWithoutSessionHint(t *testing.T) {
+	makeReq := func(userText string) *OpenAIRequest {
+		out := &OpenAIRequest{
+			Model: "glm-5.2",
+			Messages: []OpenAIMessage{
+				{Role: "system", Content: "Stable rules"},
+				{Role: "user", Content: userText},
+			},
+		}
+		ApplyOpenAIPromptCache(out, PromptCacheOptions{
+			Enabled:          true,
+			KeyPrefix:        "test",
+			NormalizePrompts: true,
+		})
+		return out
+	}
+
+	stablePrefix := strings.Repeat("stable Claude Code context\n", promptCacheFirstMessagePrefixBytes/27+2)
+	first := makeReq(stablePrefix + "turn A")
+	second := makeReq(stablePrefix + "turn B")
+	other := makeReq("different Claude Code context\n" + stablePrefix)
+
+	if first.PromptCacheKey == "" {
+		t.Fatal("prompt_cache_key was not set")
+	}
+	if first.PromptCacheKey != second.PromptCacheKey {
+		t.Fatalf("same first-message prefix should keep the same key: %q vs %q", first.PromptCacheKey, second.PromptCacheKey)
+	}
+	if first.PromptCacheKey == other.PromptCacheKey {
+		t.Fatalf("different first-message prefixes should not share the same key: %q", first.PromptCacheKey)
+	}
+}
+
 func strPtr(s string) *string { return &s }
