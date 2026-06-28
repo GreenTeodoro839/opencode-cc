@@ -18,7 +18,8 @@ type AnthropicRequest struct {
 	Tools       []AnthropicTool     `json:"tools,omitempty"`
 	ToolChoice  AnthropicToolChoice `json:"tool_choice,omitempty"`
 	Thinking    *AnthropicThinking  `json:"thinking,omitempty"`
-	// Metadata and other rarely-used fields are ignored.
+	Metadata    jsonRawMessage      `json:"metadata,omitempty"`
+	// Other rarely-used fields are ignored.
 }
 
 // MarshalJSON omits Anthropic-only optional fields when they are empty. The
@@ -38,6 +39,7 @@ func (r AnthropicRequest) MarshalJSON() ([]byte, error) {
 		Tools       []AnthropicTool      `json:"tools,omitempty"`
 		ToolChoice  *AnthropicToolChoice `json:"tool_choice,omitempty"`
 		Thinking    *AnthropicThinking   `json:"thinking,omitempty"`
+		Metadata    jsonRawMessage       `json:"metadata,omitempty"`
 	}
 	out := request{
 		Model:       r.Model,
@@ -50,6 +52,7 @@ func (r AnthropicRequest) MarshalJSON() ([]byte, error) {
 		Stream:      r.Stream,
 		Tools:       r.Tools,
 		Thinking:    r.Thinking,
+		Metadata:    r.Metadata,
 	}
 	if len(r.System.Blocks) > 0 {
 		out.System = &r.System
@@ -164,11 +167,73 @@ type AnthropicContent struct {
 	Content   *AnthropicMessageContent `json:"content,omitempty"`
 	IsError   bool                     `json:"is_error,omitempty"`
 
+	// web_search_tool_result (server tool)
+	WebSearchResults []AnthropicWebSearchResult `json:"-"`
+	WebSearchError   *AnthropicWebSearchError   `json:"-"`
+
 	// thinking (extended) — passed through as-is via Raw when present
 	Thinking string `json:"thinking,omitempty"`
 
 	// Catch-all for anything we don't specifically model.
 	Raw jsonRawMessage `json:"-"`
+}
+
+// MarshalJSON handles content blocks whose "content" field is not an
+// AnthropicMessageContent, notably server-side web search results.
+func (c AnthropicContent) MarshalJSON() ([]byte, error) {
+	switch c.Type {
+	case "server_tool_use":
+		type serverToolUse struct {
+			Type  string         `json:"type"`
+			ID    string         `json:"id"`
+			Name  string         `json:"name"`
+			Input jsonRawMessage `json:"input"`
+		}
+		input := c.Input
+		if len(input) == 0 {
+			input = jsonRawMessage(`{}`)
+		}
+		return jsonMarshal(serverToolUse{
+			Type:  c.Type,
+			ID:    c.ID,
+			Name:  c.Name,
+			Input: input,
+		})
+	case "web_search_tool_result":
+		type webSearchToolResult struct {
+			Type      string `json:"type"`
+			ToolUseID string `json:"tool_use_id"`
+			Content   any    `json:"content"`
+		}
+		var content any = c.WebSearchResults
+		if c.WebSearchError != nil {
+			content = c.WebSearchError
+		}
+		return jsonMarshal(webSearchToolResult{
+			Type:      c.Type,
+			ToolUseID: c.ToolUseID,
+			Content:   content,
+		})
+	default:
+		type alias AnthropicContent
+		return jsonMarshal(alias(c))
+	}
+}
+
+// AnthropicWebSearchResult mirrors Anthropic's server-side web_search result
+// block enough for Claude clients to recognize that a search happened.
+type AnthropicWebSearchResult struct {
+	Type             string `json:"type"`
+	Title            string `json:"title"`
+	URL              string `json:"url"`
+	URI              string `json:"uri,omitempty"`
+	EncryptedContent string `json:"encrypted_content,omitempty"`
+	PageAge          string `json:"page_age,omitempty"`
+}
+
+type AnthropicWebSearchError struct {
+	Type      string `json:"type"`
+	ErrorCode string `json:"error_code"`
 }
 
 // AnthropicImageSource describes an image source (base64 only; url support is
@@ -182,9 +247,11 @@ type AnthropicImageSource struct {
 
 // AnthropicTool is a tool definition.
 type AnthropicTool struct {
+	Type        string         `json:"type,omitempty"`
 	Name        string         `json:"name"`
 	Description string         `json:"description,omitempty"`
 	InputSchema jsonRawMessage `json:"input_schema"`
+	MaxUses     int            `json:"max_uses,omitempty"`
 }
 
 // AnthropicToolChoice mirrors the tool_choice object.
@@ -217,10 +284,15 @@ type AnthropicResponse struct {
 
 // AnthropicUsage is the usage block.
 type AnthropicUsage struct {
-	InputTokens              int `json:"input_tokens"`
-	OutputTokens             int `json:"output_tokens"`
-	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
-	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	InputTokens              int                     `json:"input_tokens"`
+	OutputTokens             int                     `json:"output_tokens"`
+	CacheReadInputTokens     int                     `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int                     `json:"cache_creation_input_tokens,omitempty"`
+	ServerToolUse            *AnthropicServerToolUse `json:"server_tool_use,omitempty"`
+}
+
+type AnthropicServerToolUse struct {
+	WebSearchRequests int `json:"web_search_requests,omitempty"`
 }
 
 // CountTokensResponse is returned by /v1/messages/count_tokens.

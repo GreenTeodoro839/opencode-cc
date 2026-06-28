@@ -246,6 +246,10 @@ Codex 请求 `/v1/responses` 时，代理会按目标模型智能选择上游：
     { "match": "claude-sonnet-4-5", "target": "glm-5.1" },
     { "match": "*", "target": "" }  // 透传兜底
   ],
+  "web_search_mode": "auto",        // auto / native / translate
+  "web_search_model": "",           // web_search 专用模型，"" = 沿用主模型
+  "web_search_base_url": "",        // native web_search 专用 Anthropic 上游，"" = 沿用主上游
+  "web_search_api_key": "",         // native web_search 专用 API key，"" = 沿用主上游 key
   "thinking_budget_mappings": [
     // 将 Claude Code 的 thinking budget_tokens 映射为模型支持的 OpenAI 扩展字段
     { "match": "glm-", "field": "thinking" },
@@ -260,6 +264,8 @@ Codex 请求 `/v1/responses` 时，代理会按目标模型智能选择上游：
 所有字段都可在 **Config** 标签页编辑，保存后桥接器热更新（重建上游客户端），无需重启。未在映射表里的 model 字符串原样转发给 Zen。
 
 OpenAI 兼容的推理模型如果返回 `reasoning_content`，代理会把它转换成 Anthropic `thinking` 块，并在下一轮请求中作为 `reasoning_content` 回传给上游，满足 DeepSeek / GLM 等模型的 thinking mode 连续对话要求。`thinking_budget_mappings` 只给明确匹配的模型追加思考控制字段：GLM 默认发送 `thinking:{"type":"enabled","clear_thinking":false}`，Kimi/Moonshot 默认发送 `thinking_budget`，DeepSeek 默认不发送 `thinking_budget`，避免触发不兼容参数。
+
+Claude Code 的 `web_search_*` server tool 支持三种模式：`auto` 保持默认智能路由；`native` 将带 web_search 的请求原样发送到 Anthropic Messages 上游，可配合 `web_search_base_url` / `web_search_api_key` 单独接入 DeepSeek Anthropic API；`translate` 使用代理本地搜索 shim，并用 `web_search_model` 整理结果。搜索专用 API key 在面板和 `/api/config` 响应中只返回脱敏状态。
 
 ## API 接口
 

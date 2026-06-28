@@ -293,6 +293,10 @@ This compatibility layer runs locally in the proxy and does not require a native
     { "match": "claude-sonnet-4-5", "target": "glm-5.1" },
     { "match": "*", "target": "" }  // Pass-through fallback
   ],
+  "web_search_mode": "auto",        // auto / native / translate
+  "web_search_model": "",           // web_search-specific model; empty means use the main target model
+  "web_search_base_url": "",        // native web_search Anthropic upstream; empty means reuse the main upstream
+  "web_search_api_key": "",         // native web_search API key; empty means reuse the main upstream key
   "thinking_budget_mappings": [
     // Map Claude Code thinking budget_tokens to model-supported OpenAI extension fields
     { "match": "glm-", "field": "thinking" },
@@ -314,6 +318,12 @@ continuation requirements for models such as DeepSeek and GLM. `thinking_budget_
 for explicitly matched models: GLM sends `thinking:{"type":"enabled","clear_thinking":false}` by default, Kimi/Moonshot
 send `thinking_budget` by default, and DeepSeek does not receive `thinking_budget`, avoiding incompatible provider
 parameters.
+
+Claude Code `web_search_*` server tools support three modes. `auto` keeps the default smart routing behavior;
+`native` passes web-search requests through to an Anthropic Messages upstream and can use a dedicated
+`web_search_base_url` / `web_search_api_key` pair, for example DeepSeek's Anthropic API; `translate` uses the local
+proxy-side search shim and summarizes results with `web_search_model`. The dedicated search API key is only returned
+masked from the dashboard API.
 
 ## API Endpoints
 

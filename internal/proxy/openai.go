@@ -22,6 +22,7 @@ type OpenAIRequest struct {
 	ToolChoice        any                  `json:"tool_choice,omitempty"`
 	ParallelToolCalls *bool                `json:"parallel_tool_calls,omitempty"`
 	PromptCacheKey    string               `json:"prompt_cache_key,omitempty"`
+	PromptCacheHint   string               `json:"-"`
 	ReasoningEffort   string               `json:"reasoning_effort,omitempty"`
 	ThinkingBudget    *int                 `json:"thinking_budget,omitempty"`
 	Thinking          *OpenAIThinking      `json:"thinking,omitempty"`

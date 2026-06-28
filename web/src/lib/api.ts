@@ -73,6 +73,11 @@ export interface PanelConfig {
   require_api_key: boolean;
   default_model: string;
   model_mappings: { match: string; target: string }[];
+  web_search_model: string;
+  web_search_mode: string;
+  web_search_base_url: string;
+  web_search_api_key_masked: string;
+  web_search_api_key_set: boolean;
   log_requests: boolean;
   max_body_log_bytes: number;
   request_timeout_seconds: number;

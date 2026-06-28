@@ -100,8 +100,11 @@ func normalizeOpenAIMessagePrefix(messages []OpenAIMessage) []OpenAIMessage {
 func buildOpenAIPromptCacheKey(req *OpenAIRequest, prefix string) string {
 	parts := []any{
 		req.Model,
-		req.Tools,
 	}
+	if req.PromptCacheHint != "" {
+		parts = append(parts, "hint", req.PromptCacheHint)
+	}
+	parts = append(parts, req.Tools)
 	for _, msg := range req.Messages {
 		if msg.Role != "system" && msg.Role != "developer" {
 			break
@@ -109,6 +112,69 @@ func buildOpenAIPromptCacheKey(req *OpenAIRequest, prefix string) string {
 		parts = append(parts, msg.Role, msg.Content)
 	}
 	return promptCacheKey(prefix, parts)
+}
+
+func anthropicPromptCacheHint(in *AnthropicRequest) string {
+	if in == nil || len(in.Metadata) == 0 {
+		return ""
+	}
+	var metadata map[string]json.RawMessage
+	if json.Unmarshal(in.Metadata, &metadata) != nil {
+		return ""
+	}
+	for _, key := range []string{"session_id", "sessionId", "conversation_id", "conversationId", "thread_id", "threadId"} {
+		if hint := promptCacheHintFromRaw(metadata[key]); hint != "" {
+			return hint
+		}
+	}
+	if hint := promptCacheHintFromRaw(metadata["user_id"]); hint != "" {
+		return hint
+	}
+	return ""
+}
+
+func promptCacheHintFromRaw(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return promptCacheHintFromString(text)
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) == nil {
+		return promptCacheHintFromObject(object)
+	}
+	return ""
+}
+
+func promptCacheHintFromString(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	if strings.HasPrefix(text, "{") {
+		var object map[string]json.RawMessage
+		if json.Unmarshal([]byte(text), &object) == nil {
+			if hint := promptCacheHintFromObject(object); hint != "" {
+				return hint
+			}
+		}
+	}
+	return text
+}
+
+func promptCacheHintFromObject(object map[string]json.RawMessage) string {
+	for _, key := range []string{"session_id", "sessionId", "conversation_id", "conversationId", "thread_id", "threadId"} {
+		var text string
+		if json.Unmarshal(object[key], &text) == nil {
+			text = strings.TrimSpace(text)
+			if text != "" {
+				return text
+			}
+		}
+	}
+	return ""
 }
 
 func buildRawPromptCacheKey(payload map[string]json.RawMessage, prefix string) string {

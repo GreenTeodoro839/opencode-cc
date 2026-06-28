@@ -29,6 +29,7 @@ func ConvertResponse(in *OpenAIResponse, requestModel string) *AnthropicResponse
 	}
 
 	choice := in.Choices[0]
+	hasToolUse := false
 	if choice.Message != nil {
 		if choice.Message.ReasoningContent != "" {
 			out.Content = append(out.Content, AnthropicContent{
@@ -43,16 +44,18 @@ func ConvertResponse(in *OpenAIResponse, requestModel string) *AnthropicResponse
 		// Tool calls.
 		for _, tc := range choice.Message.ToolCalls {
 			out.Content = append(out.Content, toolCallToBlock(tc))
+			hasToolUse = true
 		}
 		if choice.Message.FunctionCall != nil {
 			out.Content = append(out.Content, toolCallToBlock(OpenAIToolCall{
 				Type:     "function",
 				Function: *choice.Message.FunctionCall,
 			}))
+			hasToolUse = true
 		}
 	}
 
-	out.StopReason = finishReasonToStop(choice.FinishReason)
+	out.StopReason = finishReasonToStopForMessage(choice.FinishReason, hasToolUse)
 	return out
 }
 
@@ -144,6 +147,14 @@ func randHex(n int) string {
 
 // finishReasonToStop maps OpenAI finish_reason to Anthropic stop_reason.
 func finishReasonToStop(reason *string) *string {
+	return finishReasonToStopForMessage(reason, false)
+}
+
+func finishReasonToStopForMessage(reason *string, hasToolUse bool) *string {
+	if hasToolUse && (reason == nil || *reason == "stop") {
+		s := "tool_use"
+		return &s
+	}
 	if reason == nil {
 		s := "end_turn"
 		return &s

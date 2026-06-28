@@ -203,6 +203,48 @@ func TestStreamConversionAcceptsLegacyFunctionCallAndCanonicalToolName(t *testin
 	}
 }
 
+func TestStreamConversionToolCallWithStopFinishStillStopsAsToolUse(t *testing.T) {
+	var out bytes.Buffer
+	conv, err := NewStreamConverter(&out, "claude-test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conv.RestrictTools([]string{"web_search"})
+
+	finish := "stop"
+	if err := conv.HandleChunk(&OpenAIStreamChunk{Choices: []OpenAIChoice{{
+		Delta: OpenAIDelta{ToolCalls: []OpenAIToolCall{{
+			ID:   "call_web",
+			Type: "function",
+			Function: OpenAIFunctionCall{
+				Name:      "web_search",
+				Arguments: `{"query":"Claude Code web search"}`,
+			},
+		}}},
+		FinishReason: &finish,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := conv.Finalize("end_turn"); err != nil {
+		t.Fatal(err)
+	}
+	if err := conv.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	got := out.String()
+	for _, want := range []string{
+		`"type":"tool_use"`,
+		`"name":"web_search"`,
+		`"partial_json":"{\"query\":\"Claude Code web search\"}"`,
+		`"stop_reason":"tool_use"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q\n---OUTPUT---\n%s", want, got)
+		}
+	}
+}
+
 // TestNonStreamConversion checks the non-streaming path end to end.
 func TestNonStreamConversion(t *testing.T) {
 	up := &OpenAIResponse{
@@ -225,6 +267,35 @@ func TestNonStreamConversion(t *testing.T) {
 	}
 	if out.Usage.InputTokens != 5 || out.Usage.OutputTokens != 2 {
 		t.Errorf("bad usage: %+v", out.Usage)
+	}
+}
+
+func TestNonStreamConversionToolCallWithStopFinishStopsAsToolUse(t *testing.T) {
+	finish := "stop"
+	up := &OpenAIResponse{
+		ID: "chatcmpl-web",
+		Choices: []OpenAIChoice{{
+			Message: &OpenAIMessage{
+				Role: "assistant",
+				ToolCalls: []OpenAIToolCall{{
+					ID:   "call_web",
+					Type: "function",
+					Function: OpenAIFunctionCall{
+						Name:      "web_search",
+						Arguments: `{"query":"Claude Code web search"}`,
+					},
+				}},
+			},
+			FinishReason: &finish,
+		}},
+	}
+
+	out := ConvertResponse(up, "claude-test")
+	if out.StopReason == nil || *out.StopReason != "tool_use" {
+		t.Fatalf("stop_reason = %v, want tool_use", out.StopReason)
+	}
+	if len(out.Content) != 1 || out.Content[0].Type != "tool_use" || out.Content[0].Name != "web_search" {
+		t.Fatalf("tool_use block = %+v", out.Content)
 	}
 }
 
@@ -356,6 +427,46 @@ func TestRequestConversion(t *testing.T) {
 	}
 }
 
+func TestRequestConversionMapsAnthropicWebSearchServerTool(t *testing.T) {
+	in := &AnthropicRequest{
+		Model:     "claude-3-5-sonnet",
+		MaxTokens: 1024,
+		Tools: []AnthropicTool{{
+			Type:    "web_search_20250305",
+			Name:    "web_search",
+			MaxUses: 8,
+		}},
+		ToolChoice: AnthropicToolChoice{Type: "tool", Name: "web_search"},
+		Messages: []AnthropicMessage{{
+			Role:    "user",
+			Content: AnthropicMessageContent{IsStr: true, Text: "search it"},
+		}},
+	}
+	out := ConvertRequest(in, func(model string) string { return "glm-5.2" })
+
+	if len(out.Tools) != 1 || out.Tools[0].Function.Name != "web_search" {
+		t.Fatalf("tools = %+v", out.Tools)
+	}
+	var schema struct {
+		Type       string                     `json:"type"`
+		Required   []string                   `json:"required"`
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(out.Tools[0].Function.Parameters, &schema); err != nil {
+		t.Fatalf("schema was not valid JSON: %v", err)
+	}
+	if schema.Type != "object" || len(schema.Properties["query"]) == 0 {
+		t.Fatalf("schema did not expose query: %s", out.Tools[0].Function.Parameters)
+	}
+	if len(schema.Required) != 1 || schema.Required[0] != "query" {
+		t.Fatalf("required = %+v, want [query]", schema.Required)
+	}
+	choiceJSON, _ := json.Marshal(out.ToolChoice)
+	if !strings.Contains(string(choiceJSON), `"name":"web_search"`) {
+		t.Fatalf("tool_choice was not mapped to web_search: %s", choiceJSON)
+	}
+}
+
 func TestRequestConversionDisablesToolsWhenNoneDeclared(t *testing.T) {
 	in := &AnthropicRequest{
 		Model:      "deepseek-v4-flash",
@@ -400,6 +511,43 @@ func TestRequestConversionCanonicalizesToolJSON(t *testing.T) {
 	}
 	if got := out.Messages[0].ToolCalls[0].Function.Arguments; got != `{"a":1,"z":2}` {
 		t.Fatalf("tool arguments were not canonicalized: %s", got)
+	}
+}
+
+func TestPromptCacheKeyUsesClaudeSessionHint(t *testing.T) {
+	makeReq := func(sessionID, userText string) *OpenAIRequest {
+		userID, _ := json.Marshal(map[string]string{"session_id": sessionID})
+		metadata, _ := json.Marshal(map[string]string{"user_id": string(userID)})
+		out := ConvertRequest(&AnthropicRequest{
+			Model:     "claude-3-5-sonnet",
+			MaxTokens: 128,
+			System:    AnthropicSystem{Blocks: []AnthropicContent{{Type: "text", Text: "Stable system"}}},
+			Metadata:  metadata,
+			Messages: []AnthropicMessage{{
+				Role:    "user",
+				Content: AnthropicMessageContent{IsStr: true, Text: userText},
+			}},
+		}, func(model string) string { return "glm-5.2" })
+		ApplyOpenAIPromptCache(out, PromptCacheOptions{
+			Enabled:          true,
+			KeyPrefix:        "test",
+			NormalizePrompts: true,
+		})
+		return out
+	}
+
+	first := makeReq("session-a", "first turn")
+	second := makeReq("session-a", "second turn")
+	other := makeReq("session-b", "first turn")
+
+	if first.PromptCacheKey == "" {
+		t.Fatal("prompt_cache_key was not set")
+	}
+	if first.PromptCacheKey != second.PromptCacheKey {
+		t.Fatalf("same session should keep the same key: %q vs %q", first.PromptCacheKey, second.PromptCacheKey)
+	}
+	if first.PromptCacheKey == other.PromptCacheKey {
+		t.Fatalf("different sessions should not share the same key: %q", first.PromptCacheKey)
 	}
 }
 
