@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -300,6 +301,7 @@ func TestNonStreamConversionToolCallWithStopFinishStopsAsToolUse(t *testing.T) {
 }
 
 func TestReasoningContentRoundTripsAsThinking(t *testing.T) {
+	resetReasoningContentCacheForTest()
 	up := &OpenAIResponse{
 		ID: "chatcmpl-reasoning",
 		Choices: []OpenAIChoice{{
@@ -344,6 +346,59 @@ func TestReasoningContentRoundTripsAsThinking(t *testing.T) {
 	}
 }
 
+func TestReasoningContentReplayedAfterCompaction(t *testing.T) {
+	resetReasoningContentCacheForTest()
+	finish := "tool_calls"
+	up := &OpenAIResponse{
+		ID: "chatcmpl-reasoning-tool",
+		Choices: []OpenAIChoice{{
+			Message: &OpenAIMessage{
+				Role:             "assistant",
+				ReasoningContent: "hidden tool state",
+				Content:          "I will inspect the files.",
+				ToolCalls: []OpenAIToolCall{{
+					ID:   "call_original",
+					Type: "function",
+					Function: OpenAIFunctionCall{
+						Name:      "shell_command",
+						Arguments: `{"command":"Get-ChildItem"}`,
+					},
+				}},
+			},
+			FinishReason: &finish,
+		}},
+	}
+	resp := ConvertResponse(up, "claude-test")
+	var toolID string
+	for _, block := range resp.Content {
+		if block.Type == "tool_use" {
+			toolID = block.ID
+			break
+		}
+	}
+	if toolID == "" {
+		t.Fatalf("tool_use block missing: %+v", resp.Content)
+	}
+
+	req := ConvertRequest(&AnthropicRequest{
+		Model:     "deepseek-v4-flash",
+		MaxTokens: 128,
+		Messages: []AnthropicMessage{{
+			Role: "assistant",
+			Content: AnthropicMessageContent{Blocks: []AnthropicContent{
+				{Type: "text", Text: "I will inspect the files."},
+				{Type: "tool_use", ID: toolID, Name: "shell_command", Input: jsonRawMessage(`{"command":"Get-ChildItem"}`)},
+			}},
+		}},
+	}, func(model string) string { return model })
+	if len(req.Messages) != 1 {
+		t.Fatalf("messages = %+v", req.Messages)
+	}
+	if req.Messages[0].ReasoningContent != "hidden tool state" {
+		t.Fatalf("reasoning_content = %q", req.Messages[0].ReasoningContent)
+	}
+}
+
 func TestStreamConversionPreservesReasoningContent(t *testing.T) {
 	var out bytes.Buffer
 	conv, err := NewStreamConverter(&out, "claude-test", nil)
@@ -380,6 +435,54 @@ func TestStreamConversionPreservesReasoningContent(t *testing.T) {
 	}
 	if strings.Index(got, `"type":"thinking"`) > strings.Index(got, `"type":"text"`) {
 		t.Fatalf("thinking block should precede text block:\n%s", got)
+	}
+}
+
+func TestStreamReasoningContentReplayedAfterCompaction(t *testing.T) {
+	resetReasoningContentCacheForTest()
+	var out bytes.Buffer
+	conv, err := NewStreamConverter(&out, "claude-test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conv.HandleChunk(&OpenAIStreamChunk{Choices: []OpenAIChoice{{
+		Delta: OpenAIDelta{ReasoningContent: "stream hidden state"},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := conv.HandleChunk(&OpenAIStreamChunk{Choices: []OpenAIChoice{{
+		Delta: OpenAIDelta{ToolCalls: []OpenAIToolCall{{
+			ID:   "call_stream",
+			Type: "function",
+			Function: OpenAIFunctionCall{
+				Name:      "shell_command",
+				Arguments: `{"command":"pwd"}`,
+			},
+		}}},
+		FinishReason: strPtr("tool_calls"),
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := conv.Finalize("tool_use"); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	match := regexp.MustCompile(`"type":"tool_use","id":"([^"]+)"`).FindStringSubmatch(got)
+	if len(match) != 2 {
+		t.Fatalf("tool_use id missing in stream:\n%s", got)
+	}
+	req := ConvertRequest(&AnthropicRequest{
+		Model:     "deepseek-v4-flash",
+		MaxTokens: 128,
+		Messages: []AnthropicMessage{{
+			Role: "assistant",
+			Content: AnthropicMessageContent{Blocks: []AnthropicContent{{
+				Type: "tool_use", ID: match[1], Name: "shell_command", Input: jsonRawMessage(`{"command":"pwd"}`),
+			}}},
+		}},
+	}, func(model string) string { return model })
+	if req.Messages[0].ReasoningContent != "stream hidden state" {
+		t.Fatalf("reasoning_content = %q", req.Messages[0].ReasoningContent)
 	}
 }
 

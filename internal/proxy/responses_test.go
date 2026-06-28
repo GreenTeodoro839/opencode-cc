@@ -384,6 +384,7 @@ func TestConvertResponsesResponse(t *testing.T) {
 }
 
 func TestConvertResponsesResponsePreservesReasoningContent(t *testing.T) {
+	resetReasoningContentCacheForTest()
 	in := &OpenAIResponse{
 		ID: "chatcmpl-reasoning",
 		Choices: []OpenAIChoice{{
@@ -409,6 +410,78 @@ func TestConvertResponsesResponsePreservesReasoningContent(t *testing.T) {
 	}
 	if out.Output[1].Type != "message" || out.Output[1].Content[0].Text != "done" {
 		t.Fatalf("message output = %+v", out.Output[1])
+	}
+}
+
+func TestResponsesReasoningItemBecomesChatReasoningContent(t *testing.T) {
+	resetReasoningContentCacheForTest()
+	body := []byte(`{
+		"model":"deepseek-v4-flash",
+		"input":[
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"think before tool"}]},
+			{"type":"function_call","call_id":"call_123","name":"shell_command","arguments":"{\"command\":\"pwd\"}"}
+		]
+	}`)
+	req, err := ParseResponsesRequest(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := ConvertResponsesRequest(req, func(string) string { return "deepseek-v4-flash" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Messages) != 1 || out.Messages[0].Role != "assistant" {
+		t.Fatalf("messages = %+v", out.Messages)
+	}
+	if out.Messages[0].ReasoningContent != "think before tool" {
+		t.Fatalf("reasoning_content = %q", out.Messages[0].ReasoningContent)
+	}
+}
+
+func TestResponsesReasoningContentReplayedAfterCompaction(t *testing.T) {
+	resetReasoningContentCacheForTest()
+	finish := "tool_calls"
+	in := &OpenAIResponse{
+		ID: "chatcmpl-reasoning-tool",
+		Choices: []OpenAIChoice{{
+			Index: 0,
+			Message: &OpenAIMessage{
+				Role:             "assistant",
+				ReasoningContent: "cached responses reasoning",
+				ToolCalls: []OpenAIToolCall{{
+					ID:   "call_abc",
+					Type: "function",
+					Function: OpenAIFunctionCall{
+						Name:      "shell_command",
+						Arguments: `{"command":"pwd"}`,
+					},
+				}},
+			},
+			FinishReason: &finish,
+		}},
+		Usage: OpenAIUsage{PromptTokens: 4, CompletionTokens: 3, TotalTokens: 7},
+	}
+	out := ConvertResponsesResponse(in, "client-model")
+	if len(out.Output) != 2 || out.Output[1].CallID != "call_abc" {
+		t.Fatalf("output = %+v", out.Output)
+	}
+
+	body := []byte(`{
+		"model":"deepseek-v4-flash",
+		"input":[
+			{"type":"function_call","call_id":"call_abc","name":"shell_command","arguments":"{\"command\":\"pwd\"}"}
+		]
+	}`)
+	req, err := ParseResponsesRequest(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chatReq, err := ConvertResponsesRequest(req, func(string) string { return "deepseek-v4-flash" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chatReq.Messages) != 1 || chatReq.Messages[0].ReasoningContent != "cached responses reasoning" {
+		t.Fatalf("messages = %+v", chatReq.Messages)
 	}
 }
 

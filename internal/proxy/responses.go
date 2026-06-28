@@ -38,15 +38,16 @@ type ResponsesTool struct {
 }
 
 type responsesInputItem struct {
-	Type      string          `json:"type"`
-	Role      string          `json:"role,omitempty"`
-	Content   json.RawMessage `json:"content,omitempty"`
-	ID        string          `json:"id,omitempty"`
-	CallID    string          `json:"call_id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Arguments string          `json:"arguments,omitempty"`
-	Input     string          `json:"input,omitempty"`
-	Output    json.RawMessage `json:"output,omitempty"`
+	Type      string                      `json:"type"`
+	Role      string                      `json:"role,omitempty"`
+	Content   json.RawMessage             `json:"content,omitempty"`
+	ID        string                      `json:"id,omitempty"`
+	CallID    string                      `json:"call_id,omitempty"`
+	Name      string                      `json:"name,omitempty"`
+	Arguments string                      `json:"arguments,omitempty"`
+	Input     string                      `json:"input,omitempty"`
+	Output    json.RawMessage             `json:"output,omitempty"`
+	Summary   []ResponsesReasoningSummary `json:"summary,omitempty"`
 }
 
 type responsesContentPart struct {
@@ -191,6 +192,7 @@ func responsesInputToAnthropicMessages(raw json.RawMessage) ([]AnthropicMessage,
 
 	var messages []AnthropicMessage
 	var systemBlocks []AnthropicContent
+	var pendingReasoning string
 	for _, item := range items {
 		switch item.Type {
 		case "", "message":
@@ -215,12 +217,20 @@ func responsesInputToAnthropicMessages(raw json.RawMessage) ([]AnthropicMessage,
 			if callID == "" {
 				callID = "call_" + randHex(24)
 			}
-			appendAnthropicMessage(&messages, "assistant", []AnthropicContent{{
+			reasoning := pendingReasoning
+			if reasoning == "" {
+				reasoning = cachedReasoningForToolCalls([]string{callID})
+			}
+			blocks := reasoningAnthropicBlocks(reasoning)
+			blocks = append(blocks, AnthropicContent{
 				Type:  "tool_use",
 				ID:    callID,
 				Name:  item.Name,
 				Input: responsesArgumentsToAnthropicInput(item.Arguments),
-			}})
+			})
+			cacheReasoningForToolCalls(reasoning, callID)
+			appendAnthropicMessage(&messages, "assistant", blocks)
+			pendingReasoning = ""
 		case "custom_tool_call":
 			callID := item.CallID
 			if callID == "" {
@@ -230,12 +240,20 @@ func responsesInputToAnthropicMessages(raw json.RawMessage) ([]AnthropicMessage,
 				callID = "call_" + randHex(24)
 			}
 			input, _ := json.Marshal(map[string]string{"input": item.Input})
-			appendAnthropicMessage(&messages, "assistant", []AnthropicContent{{
+			reasoning := pendingReasoning
+			if reasoning == "" {
+				reasoning = cachedReasoningForToolCalls([]string{callID})
+			}
+			blocks := reasoningAnthropicBlocks(reasoning)
+			blocks = append(blocks, AnthropicContent{
 				Type:  "tool_use",
 				ID:    callID,
 				Name:  item.Name,
 				Input: input,
-			}})
+			})
+			cacheReasoningForToolCalls(reasoning, callID)
+			appendAnthropicMessage(&messages, "assistant", blocks)
+			pendingReasoning = ""
 		case "function_call_output", "custom_tool_call_output":
 			callID := item.CallID
 			if callID == "" {
@@ -251,10 +269,19 @@ func responsesInputToAnthropicMessages(raw json.RawMessage) ([]AnthropicMessage,
 				Content:   &content,
 			}})
 		case "reasoning":
+			pendingReasoning = responsesReasoningText(item)
 			continue
 		}
 	}
 	return messages, systemBlocks, nil
+}
+
+func reasoningAnthropicBlocks(reasoning string) []AnthropicContent {
+	reasoning = strings.TrimSpace(reasoning)
+	if reasoning == "" {
+		return nil
+	}
+	return []AnthropicContent{{Type: "thinking", Thinking: reasoning}}
 }
 
 func appendAnthropicMessage(messages *[]AnthropicMessage, role string, blocks []AnthropicContent) {
@@ -406,6 +433,7 @@ func responsesInputToMessages(raw json.RawMessage) ([]OpenAIMessage, error) {
 
 	var system []OpenAIMessage
 	var out []OpenAIMessage
+	var pendingReasoning string
 	for _, item := range items {
 		switch item.Type {
 		case "", "message":
@@ -427,6 +455,10 @@ func responsesInputToMessages(raw json.RawMessage) ([]OpenAIMessage, error) {
 			if callID == "" {
 				callID = item.ID
 			}
+			reasoning := pendingReasoning
+			if reasoning == "" {
+				reasoning = cachedReasoningForToolCalls([]string{callID})
+			}
 			appendResponsesToolCall(&out, OpenAIToolCall{
 				ID:   callID,
 				Type: "function",
@@ -434,13 +466,19 @@ func responsesInputToMessages(raw json.RawMessage) ([]OpenAIMessage, error) {
 					Name:      item.Name,
 					Arguments: canonicalJSONString(item.Arguments),
 				},
-			})
+			}, reasoning)
+			cacheReasoningForToolCalls(reasoning, callID)
+			pendingReasoning = ""
 		case "custom_tool_call":
 			callID := item.CallID
 			if callID == "" {
 				callID = item.ID
 			}
 			args, _ := json.Marshal(map[string]string{"input": item.Input})
+			reasoning := pendingReasoning
+			if reasoning == "" {
+				reasoning = cachedReasoningForToolCalls([]string{callID})
+			}
 			appendResponsesToolCall(&out, OpenAIToolCall{
 				ID:   callID,
 				Type: "function",
@@ -448,7 +486,9 @@ func responsesInputToMessages(raw json.RawMessage) ([]OpenAIMessage, error) {
 					Name:      item.Name,
 					Arguments: string(args),
 				},
-			})
+			}, reasoning)
+			cacheReasoningForToolCalls(reasoning, callID)
+			pendingReasoning = ""
 		case "function_call_output", "custom_tool_call_output":
 			callID := item.CallID
 			if callID == "" {
@@ -460,27 +500,44 @@ func responsesInputToMessages(raw json.RawMessage) ([]OpenAIMessage, error) {
 				Content:    rawText(item.Output),
 			})
 		case "reasoning":
-			// Reasoning items are model-internal state and have no portable
-			// Chat Completions representation.
+			pendingReasoning = responsesReasoningText(item)
 			continue
 		}
 	}
 	return append(system, out...), nil
 }
 
-func appendResponsesToolCall(messages *[]OpenAIMessage, call OpenAIToolCall) {
+func appendResponsesToolCall(messages *[]OpenAIMessage, call OpenAIToolCall, reasoning string) {
 	if len(*messages) > 0 {
 		last := &(*messages)[len(*messages)-1]
 		if last.Role == "assistant" {
+			if last.ReasoningContent == "" {
+				last.ReasoningContent = reasoning
+			}
 			last.ToolCalls = append(last.ToolCalls, call)
 			return
 		}
 	}
 	*messages = append(*messages, OpenAIMessage{
-		Role:      "assistant",
-		Content:   "",
-		ToolCalls: []OpenAIToolCall{call},
+		Role:             "assistant",
+		Content:          "",
+		ReasoningContent: reasoning,
+		ToolCalls:        []OpenAIToolCall{call},
 	})
+}
+
+func responsesReasoningText(item responsesInputItem) string {
+	var b strings.Builder
+	for _, summary := range item.Summary {
+		if strings.TrimSpace(summary.Text) == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(summary.Text)
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func responsesMessageContent(raw json.RawMessage, role string) any {
@@ -690,6 +747,7 @@ func ConvertResponsesResponse(in *OpenAIResponse, requestModel string) *Response
 			Name:      tool.Function.Name,
 			Arguments: tool.Function.Arguments,
 		})
+		cacheReasoningForToolCalls(message.ReasoningContent, callID)
 	}
 	if choice.FinishReason != nil && *choice.FinishReason == "length" {
 		out.Status = "incomplete"
@@ -712,6 +770,7 @@ func ConvertAnthropicResponseToResponses(in *AnthropicResponse, requestModel str
 	out.Usage = anthropicResponsesUsage(in.Usage)
 
 	var text strings.Builder
+	var pendingReasoning string
 	flushText := func() {
 		if text.Len() == 0 {
 			return
@@ -721,6 +780,12 @@ func ConvertAnthropicResponseToResponses(in *AnthropicResponse, requestModel str
 	}
 	for _, block := range in.Content {
 		switch block.Type {
+		case "thinking":
+			flushText()
+			pendingReasoning = strings.TrimSpace(pendingReasoning + "\n" + thinkingText(block))
+			if pendingReasoning != "" {
+				out.Output = append(out.Output, completedReasoningItem("rs_"+randHex(24), pendingReasoning))
+			}
 		case "text":
 			text.WriteString(block.Text)
 		case "tool_use":
@@ -737,6 +802,7 @@ func ConvertAnthropicResponseToResponses(in *AnthropicResponse, requestModel str
 				Name:      block.Name,
 				Arguments: compactJSON(block.Input),
 			})
+			cacheReasoningForToolCalls(pendingReasoning, callID)
 		}
 	}
 	flushText()
@@ -1202,6 +1268,9 @@ func (c *ResponsesStreamConverter) Finalize() error {
 		state := c.tools[index]
 		state.item.Status = "completed"
 		output[state.outputIndex] = state.item
+		if c.reasoning != nil {
+			cacheReasoningForToolCalls(c.reasoning.text.String(), state.item.CallID)
+		}
 		if err := c.writeEvent("response.function_call_arguments.done", map[string]any{
 			"type":         "response.function_call_arguments.done",
 			"item_id":      state.item.ID,

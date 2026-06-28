@@ -198,6 +198,11 @@ func convertAssistantBlocks(m AnthropicMessage) []OpenAIMessage {
 			hasText = true
 		}
 	}
+	if msg.ReasoningContent == "" && len(toolCalls) > 0 {
+		msg.ReasoningContent = cachedReasoningForToolCalls(toolCallIDs(toolCalls))
+	} else if msg.ReasoningContent != "" && len(toolCalls) > 0 {
+		cacheReasoningForToolCalls(msg.ReasoningContent, toolCallIDs(toolCalls)...)
+	}
 	if len(parts) > 0 {
 		if len(parts) == 1 {
 			msg.Content = parts[0].Text
@@ -211,6 +216,16 @@ func convertAssistantBlocks(m AnthropicMessage) []OpenAIMessage {
 	}
 	msg.ToolCalls = toolCalls
 	return []OpenAIMessage{msg}
+}
+
+func toolCallIDs(calls []OpenAIToolCall) []string {
+	ids := make([]string, 0, len(calls))
+	for _, call := range calls {
+		if call.ID != "" {
+			ids = append(ids, call.ID)
+		}
+	}
+	return ids
 }
 
 func thinkingText(b AnthropicContent) string {

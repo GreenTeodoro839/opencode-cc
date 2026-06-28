@@ -125,6 +125,8 @@ type StreamConverter struct {
 	restrictTools    bool
 	allowedTools     map[string]struct{}
 	acceptedToolCall bool
+	reasoning        strings.Builder
+	toolIDs          []string
 
 	// OpenAI streams send finish_reason on the last content chunk and usage in
 	// a trailing empty-choices chunk. We remember the finish reason and emit
@@ -252,6 +254,7 @@ func (c *StreamConverter) HandleChunk(chunk *OpenAIStreamChunk) error {
 }
 
 func (c *StreamConverter) handleThinking(text string) error {
+	c.reasoning.WriteString(text)
 	if c.cur == nil || c.cur.kind != "thinking" {
 		if err := c.closeCurrent(); err != nil {
 			return err
@@ -331,6 +334,7 @@ func (c *StreamConverter) handleToolCall(tc OpenAIToolCall) error {
 			idx := c.nextIdx
 			c.nextIdx++
 			c.cur = &blockState{index: idx, kind: "tool_use", toolid: rawID}
+			c.toolIDs = append(c.toolIDs, normalised)
 			c.acceptedToolCall = true
 			if err := c.writeEvent("content_block_start", streamContentBlockStart{
 				Type:  "content_block_start",
@@ -406,6 +410,7 @@ func (c *StreamConverter) Finalize(stopReason string) error {
 	if err := c.closeCurrent(); err != nil {
 		return err
 	}
+	cacheReasoningForToolCalls(c.reasoning.String(), c.toolIDs...)
 	// Prefer the finish_reason the upstream reported; fall back to the caller's
 	// stopReason (e.g. "stream_error").
 	reason := c.pendingFinish

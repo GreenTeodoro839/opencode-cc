@@ -161,9 +161,30 @@ func TestProxyReplaysReasoningContentOnFollowup(t *testing.T) {
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if calls == 1 {
+			_, _ = io.WriteString(w, `{
+				"id":"chatcmpl-reasoning",
+				"choices":[{
+					"index":0,
+					"message":{
+						"role":"assistant",
+						"reasoning_content":"deepseek hidden state",
+						"content":"I will inspect the workspace.",
+						"tool_calls":[{
+							"id":"toolu_reasoning_cache",
+							"type":"function",
+							"function":{"name":"shell_command","arguments":"{\"command\":\"Get-ChildItem\"}"}
+						}]
+					},
+					"finish_reason":"tool_calls"
+				}],
+				"usage":{"prompt_tokens":6,"completion_tokens":3,"total_tokens":9}
+			}`)
+			return
+		}
 		_, _ = io.WriteString(w, `{
 			"id":"chatcmpl-reasoning",
-			"choices":[{"index":0,"message":{"role":"assistant","reasoning_content":"deepseek hidden state","content":"visible answer"},"finish_reason":"stop"}],
+			"choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],
 			"usage":{"prompt_tokens":6,"completion_tokens":3,"total_tokens":9}
 		}`)
 	}))
@@ -174,6 +195,7 @@ func TestProxyReplaysReasoningContentOnFollowup(t *testing.T) {
 	firstBody := []byte(`{
 		"model":"deepseek-v4-flash",
 		"max_tokens":256,
+		"tools":[{"name":"shell_command","description":"run shell command","input_schema":{"type":"object","properties":{"command":{"type":"string"}}}}],
 		"messages":[{"role":"user","content":"hi"}]
 	}`)
 	firstReq := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(firstBody))
@@ -191,15 +213,36 @@ func TestProxyReplaysReasoningContentOnFollowup(t *testing.T) {
 		firstResp.Content[0].Thinking != "deepseek hidden state" {
 		t.Fatalf("first response did not expose thinking block for replay: %+v", firstResp.Content)
 	}
+	var toolBlock proxy.AnthropicContent
+	for _, block := range firstResp.Content {
+		if block.Type == "tool_use" {
+			toolBlock = block
+			break
+		}
+	}
+	if toolBlock.ID == "" {
+		t.Fatalf("first response did not include tool_use: %+v", firstResp.Content)
+	}
 
 	secondBody, _ := json.Marshal(map[string]any{
 		"model":      "deepseek-v4-flash",
 		"max_tokens": 256,
+		"tools": []map[string]any{{
+			"name":        "shell_command",
+			"description": "run shell command",
+			"input_schema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"command": map[string]any{"type": "string"}},
+			},
+		}},
 		"messages": []map[string]any{
 			{"role": "user", "content": "hi"},
 			{"role": "assistant", "content": []map[string]any{
-				{"type": "thinking", "thinking": firstResp.Content[0].Thinking},
-				{"type": "text", "text": firstResp.Content[1].Text},
+				{"type": "text", "text": "I will inspect the workspace."},
+				{"type": "tool_use", "id": toolBlock.ID, "name": toolBlock.Name, "input": map[string]any{"command": "Get-ChildItem"}},
+			}},
+			{"role": "user", "content": []map[string]any{
+				{"type": "tool_result", "tool_use_id": toolBlock.ID, "content": "README.md"},
 			}},
 			{"role": "user", "content": "continue"},
 		},
