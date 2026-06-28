@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 )
 
 // ConvertRequest turns an Anthropic Messages request into an OpenAI Chat
@@ -17,13 +18,18 @@ import (
 //
 // resolveModel is called to map the incoming model name to an upstream target.
 func ConvertRequest(in *AnthropicRequest, resolveModel func(string) string) *OpenAIRequest {
+	promptCacheHint := anthropicPromptCacheHint(in)
+	if promptCacheHint == "" {
+		promptCacheHint = anthropicCacheControlPromptCacheHint(in)
+	}
 	out := &OpenAIRequest{
-		Model:       resolveModel(in.Model),
-		Stream:      in.Stream,
-		Stop:        in.Stop,
-		MaxTokens:   &in.MaxTokens,
-		Temperature: in.Temperature,
-		TopP:        in.TopP,
+		Model:           resolveModel(in.Model),
+		Stream:          in.Stream,
+		Stop:            in.Stop,
+		MaxTokens:       &in.MaxTokens,
+		Temperature:     in.Temperature,
+		TopP:            in.TopP,
+		PromptCacheHint: promptCacheHint,
 	}
 
 	// System prompt first, if present.
@@ -39,14 +45,7 @@ func ConvertRequest(in *AnthropicRequest, resolveModel func(string) string) *Ope
 	if len(in.Tools) > 0 {
 		out.Tools = make([]OpenAITool, 0, len(in.Tools))
 		for _, t := range in.Tools {
-			out.Tools = append(out.Tools, OpenAITool{
-				Type: "function",
-				Function: OpenAIToolFunction{
-					Name:        t.Name,
-					Description: t.Description,
-					Parameters:  ensureObjectSchema(t.InputSchema),
-				},
-			})
+			out.Tools = append(out.Tools, openAIToolFromAnthropic(t))
 		}
 		sortOpenAITools(out.Tools)
 	} else {
@@ -85,6 +84,38 @@ func ConvertRequest(in *AnthropicRequest, resolveModel func(string) string) *Ope
 	}
 
 	return out
+}
+
+func openAIToolFromAnthropic(t AnthropicTool) OpenAITool {
+	description := t.Description
+	if description == "" && isAnthropicWebSearchTool(t) {
+		description = "Search the web for current information. Use the query field for the search terms."
+	}
+	return OpenAITool{
+		Type: "function",
+		Function: OpenAIToolFunction{
+			Name:        t.Name,
+			Description: description,
+			Parameters:  anthropicToolSchema(t),
+		},
+	}
+}
+
+func anthropicToolSchema(t AnthropicTool) jsonRawMessage {
+	if isAnthropicWebSearchTool(t) {
+		return jsonRawMessage(`{"additionalProperties":false,"properties":{"allowed_domains":{"description":"Optional list of domains that may be searched.","items":{"type":"string"},"type":"array"},"blocked_domains":{"description":"Optional list of domains to exclude from search.","items":{"type":"string"},"type":"array"},"query":{"description":"The search query.","type":"string"}},"required":["query"],"type":"object"}`)
+	}
+	return ensureObjectSchema(t.InputSchema)
+}
+
+func isAnthropicWebSearchTool(t AnthropicTool) bool {
+	return IsAnthropicWebSearchTool(t)
+}
+
+func IsAnthropicWebSearchTool(t AnthropicTool) bool {
+	typ := strings.ToLower(t.Type)
+	name := strings.ToLower(t.Name)
+	return strings.HasPrefix(typ, "web_search_") || (name == "web_search" && strings.HasPrefix(typ, "web_search"))
 }
 
 // buildSystemMessages turns the system field into one or more system messages.

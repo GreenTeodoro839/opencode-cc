@@ -77,6 +77,56 @@ func TestPromptCacheConfigPatch(t *testing.T) {
 	}
 }
 
+func TestWebSearchModelConfigPatch(t *testing.T) {
+	c := Default()
+	if got := c.ResolveWebSearchModel("glm-main"); got != "glm-main" {
+		t.Fatalf("default web search model = %q, want fallback", got)
+	}
+	if got := c.ResolveWebSearchMode(); got != WebSearchModeAuto {
+		t.Fatalf("default web search mode = %q, want auto", got)
+	}
+
+	model := "anthropic/glm-cheap"
+	mode := "shim"
+	baseURL := "https://api.deepseek.com/anthropic/"
+	apiKey := "search-key"
+	c.ApplyPatch(&Patch{
+		WebSearchModel:   &model,
+		WebSearchMode:    &mode,
+		WebSearchBaseURL: &baseURL,
+		WebSearchAPIKey:  &apiKey,
+	})
+	snap := c.Snapshot()
+	if snap.WebSearchModel != "glm-cheap" ||
+		snap.WebSearchMode != WebSearchModeTranslate ||
+		snap.WebSearchBaseURL != "https://api.deepseek.com/anthropic" ||
+		snap.WebSearchAPIKey != "search-key" {
+		t.Fatalf("web search model patch/snapshot mismatch: %+v", snap)
+	}
+	if got := c.ResolveWebSearchModel("glm-main"); got != "glm-cheap" {
+		t.Fatalf("ResolveWebSearchModel = %q, want glm-cheap", got)
+	}
+	if got := c.ResolveWebSearchMode(); got != WebSearchModeTranslate {
+		t.Fatalf("ResolveWebSearchMode = %q, want translate", got)
+	}
+	gotBase, gotKey := c.ResolveWebSearchUpstream("https://main.example", "main-key")
+	if gotBase != "https://api.deepseek.com/anthropic" || gotKey != "search-key" {
+		t.Fatalf("ResolveWebSearchUpstream = %q/%q", gotBase, gotKey)
+	}
+
+	clear := ""
+	c.ApplyPatch(&Patch{WebSearchModel: &clear})
+	if got := c.ResolveWebSearchModel("glm-main"); got != "glm-main" {
+		t.Fatalf("cleared web search model = %q, want fallback", got)
+	}
+
+	c = Default()
+	gotBase, gotKey = c.ResolveWebSearchUpstream("https://main.example", "main-key")
+	if gotBase != "https://main.example" || gotKey != "main-key" {
+		t.Fatalf("default ResolveWebSearchUpstream = %q/%q", gotBase, gotKey)
+	}
+}
+
 func TestResolveThinkingBudgetMapping(t *testing.T) {
 	c := Default()
 

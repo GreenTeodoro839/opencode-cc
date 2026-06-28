@@ -412,6 +412,9 @@ func (c *StreamConverter) Finalize(stopReason string) error {
 	if reason == "" {
 		reason = "stop"
 	}
+	if c.acceptedToolCall && reason == "stop" {
+		reason = "tool_calls"
+	}
 	if (reason == "tool_calls" || reason == "function_call") && !c.acceptedToolCall {
 		reason = "stop"
 	}

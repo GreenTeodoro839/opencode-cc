@@ -56,6 +56,10 @@ func TestConfigPatchPreservesOmittedFields(t *testing.T) {
 	cfg.MaxBodyLogBytes = 1234
 	cfg.PromptCacheEnabled = true
 	cfg.PromptCacheKeyPrefix = "stable"
+	cfg.WebSearchModel = "glm-cheap"
+	cfg.WebSearchMode = config.WebSearchModeTranslate
+	cfg.WebSearchBaseURL = "https://api.deepseek.com/anthropic"
+	cfg.WebSearchAPIKey = "search-key"
 	mux := newTestAPI(t, cfg)
 
 	body := bytes.NewBufferString(`{"panel_token":"new-password"}`)
@@ -76,7 +80,11 @@ func TestConfigPatchPreservesOmittedFields(t *testing.T) {
 		!got.LogRequests ||
 		got.MaxBodyLogBytes != 1234 ||
 		!got.PromptCacheEnabled ||
-		got.PromptCacheKeyPrefix != "stable" {
+		got.PromptCacheKeyPrefix != "stable" ||
+		got.WebSearchModel != "glm-cheap" ||
+		got.WebSearchMode != config.WebSearchModeTranslate ||
+		got.WebSearchBaseURL != "https://api.deepseek.com/anthropic" ||
+		got.WebSearchAPIKey != "search-key" {
 		t.Fatalf("omitted fields changed: %+v", got)
 	}
 }
@@ -138,6 +146,43 @@ func TestConfigPatchUpdatesPromptCache(t *testing.T) {
 		out["prompt_cache_anthropic_control"] != false ||
 		out["prompt_cache_normalize"] != false {
 		t.Fatalf("prompt cache missing from public config: %s", rec.Body.String())
+	}
+}
+
+func TestConfigPatchUpdatesWebSearchSettings(t *testing.T) {
+	cfg := config.Default()
+	mux := newTestAPI(t, cfg)
+
+	body := bytes.NewBufferString(`{
+		"web_search_model":"anthropic/glm-cheap",
+		"web_search_mode":"native",
+		"web_search_base_url":"https://api.deepseek.com/anthropic/",
+		"web_search_api_key":"search-key"
+	}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/config", body)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if snap := cfg.Snapshot(); snap.WebSearchModel != "glm-cheap" ||
+		snap.WebSearchMode != config.WebSearchModeNative ||
+		snap.WebSearchBaseURL != "https://api.deepseek.com/anthropic" ||
+		snap.WebSearchAPIKey != "search-key" {
+		t.Fatalf("web search settings were not updated: %+v", snap)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if out["web_search_model"] != "glm-cheap" ||
+		out["web_search_mode"] != "native" ||
+		out["web_search_base_url"] != "https://api.deepseek.com/anthropic" ||
+		out["web_search_api_key_set"] != true ||
+		out["web_search_api_key_masked"] == "" ||
+		strings.Contains(rec.Body.String(), "search-key") {
+		t.Fatalf("web search settings missing from public config: %s", rec.Body.String())
 	}
 }
 

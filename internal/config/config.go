@@ -17,11 +17,15 @@ import (
 
 // Default values used when nothing else is configured.
 const (
-	DefaultListenAddr   = ":8787"
-	DefaultUpstreamBase = "https://opencode.ai/zen"
-	DefaultDefaultModel = "glm-4.6"
-	DefaultDataDir      = "data"
-	DefaultConfigFile   = "config.json"
+	DefaultListenAddr      = ":8787"
+	DefaultUpstreamBase    = "https://opencode.ai/zen"
+	DefaultDefaultModel    = "glm-4.6"
+	DefaultDataDir         = "data"
+	DefaultConfigFile      = "config.json"
+	WebSearchModeAuto      = "auto"
+	WebSearchModeNative    = "native"
+	WebSearchModeTranslate = "translate"
+	DefaultWebSearchMode   = WebSearchModeAuto
 )
 
 // ModelMapping maps an incoming Anthropic model name (often "claude-*") to the
@@ -85,6 +89,18 @@ type Config struct {
 	// ModelMappings are evaluated in order; first match wins. The final
 	// entry should have Match:"*" as a catch-all.
 	ModelMappings []ModelMapping `json:"model_mappings"`
+	// WebSearchModel optionally overrides the upstream model used by the
+	// Anthropic web_search shim. Empty means use the resolved main target model.
+	WebSearchModel string `json:"web_search_model"`
+	// WebSearchMode controls Anthropic web_search handling:
+	// auto uses native Messages routing when the target model is native-capable,
+	// native forces pass-through to /v1/messages, and translate uses the proxy shim.
+	WebSearchMode string `json:"web_search_mode"`
+	// WebSearchBaseURL and WebSearchAPIKey optionally override the upstream
+	// used by native web_search requests. Empty means reuse the selected main
+	// upstream and key.
+	WebSearchBaseURL string `json:"web_search_base_url"`
+	WebSearchAPIKey  string `json:"web_search_api_key"`
 	// LogRequests records each request/response to SQLite for the panel.
 	LogRequests bool `json:"log_requests"`
 	// MaxBodyLogBytes caps how much of a request/response body is stored.
@@ -126,6 +142,10 @@ type Patch struct {
 	RequireAPIKey               *bool                    `json:"require_api_key"`
 	DefaultModel                *string                  `json:"default_model"`
 	ModelMappings               *[]ModelMapping          `json:"model_mappings"`
+	WebSearchModel              *string                  `json:"web_search_model"`
+	WebSearchMode               *string                  `json:"web_search_mode"`
+	WebSearchBaseURL            *string                  `json:"web_search_base_url"`
+	WebSearchAPIKey             *string                  `json:"web_search_api_key"`
 	LogRequests                 *bool                    `json:"log_requests"`
 	MaxBodyLogBytes             *int                     `json:"max_body_log_bytes"`
 	RequestTimeoutSeconds       *int                     `json:"request_timeout_seconds"`
@@ -145,6 +165,7 @@ func Default() *Config {
 		RequireAPIKey:               false, // open by default for single-user local use
 		DefaultModel:                DefaultDefaultModel,
 		ModelMappings:               DefaultModelMappings(),
+		WebSearchMode:               DefaultWebSearchMode,
 		LogRequests:                 true,
 		MaxBodyLogBytes:             1 << 14, // 16 KiB per body side
 		RequestTimeoutSeconds:       0,
@@ -281,6 +302,18 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("OPENCODE_CC_DEFAULT_MODEL"); v != "" {
 		c.DefaultModel = v
 	}
+	if v := os.Getenv("OPENCODE_CC_WEB_SEARCH_MODEL"); v != "" {
+		c.WebSearchModel = stripProviderPrefix(strings.TrimSpace(v))
+	}
+	if v := os.Getenv("OPENCODE_CC_WEB_SEARCH_MODE"); v != "" {
+		c.WebSearchMode = normalizeWebSearchMode(v)
+	}
+	if v := os.Getenv("OPENCODE_CC_WEB_SEARCH_BASE_URL"); v != "" {
+		c.WebSearchBaseURL = strings.TrimRight(strings.TrimSpace(v), "/")
+	}
+	if v := os.Getenv("OPENCODE_CC_WEB_SEARCH_API_KEY"); v != "" {
+		c.WebSearchAPIKey = strings.TrimSpace(v)
+	}
 	if v := os.Getenv("OPENCODE_CC_LOG_REQUESTS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.LogRequests = b
@@ -348,6 +381,10 @@ func (c *Config) Snapshot() *Config {
 		PanelToken:                  c.PanelToken,
 		RequireAPIKey:               c.RequireAPIKey,
 		DefaultModel:                c.DefaultModel,
+		WebSearchModel:              c.WebSearchModel,
+		WebSearchMode:               normalizeWebSearchMode(c.WebSearchMode),
+		WebSearchBaseURL:            c.WebSearchBaseURL,
+		WebSearchAPIKey:             c.WebSearchAPIKey,
 		LogRequests:                 c.LogRequests,
 		MaxBodyLogBytes:             c.MaxBodyLogBytes,
 		RequestTimeoutSeconds:       c.RequestTimeoutSeconds,
@@ -399,6 +436,42 @@ func (c *Config) ResolveModel(in string) string {
 	return DefaultDefaultModel
 }
 
+// ResolveWebSearchModel returns the configured upstream model for proxy-side
+// web_search work. Empty config falls back to the main resolved target model.
+func (c *Config) ResolveWebSearchModel(fallback string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	model := strings.TrimSpace(c.WebSearchModel)
+	if model == "" {
+		return fallback
+	}
+	return stripProviderPrefix(model)
+}
+
+// ResolveWebSearchMode returns the configured web_search routing mode.
+func (c *Config) ResolveWebSearchMode() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return normalizeWebSearchMode(c.WebSearchMode)
+}
+
+// ResolveWebSearchUpstream returns the native web_search upstream and key.
+// Empty web_search override fields fall back to the already-selected main
+// upstream so existing deployments keep working.
+func (c *Config) ResolveWebSearchUpstream(fallbackBaseURL, fallbackAPIKey string) (string, string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	baseURL := strings.TrimRight(strings.TrimSpace(c.WebSearchBaseURL), "/")
+	if baseURL == "" {
+		baseURL = fallbackBaseURL
+	}
+	apiKey := strings.TrimSpace(c.WebSearchAPIKey)
+	if apiKey == "" {
+		apiKey = fallbackAPIKey
+	}
+	return baseURL, apiKey
+}
+
 // ResolveThinkingBudgetMapping returns the first budget mapping that matches
 // the target model id. Provider prefixes are stripped before matching.
 func (c *Config) ResolveThinkingBudgetMapping(model string) (ThinkingBudgetMapping, bool) {
@@ -424,6 +497,19 @@ func stripProviderPrefix(in string) string {
 		return in[i+1:]
 	}
 	return in
+}
+
+func normalizeWebSearchMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", WebSearchModeAuto:
+		return WebSearchModeAuto
+	case WebSearchModeNative, "direct", "passthrough", "pass-through":
+		return WebSearchModeNative
+	case WebSearchModeTranslate, "shim", "proxy":
+		return WebSearchModeTranslate
+	default:
+		return DefaultWebSearchMode
+	}
 }
 
 // RLock / RUnlock expose the read lock for hot-path callers that want to read
@@ -481,6 +567,18 @@ func (c *Config) ApplyPatch(src *Patch) {
 	}
 	if src.ModelMappings != nil {
 		c.ModelMappings = append([]ModelMapping(nil), (*src.ModelMappings)...)
+	}
+	if src.WebSearchModel != nil {
+		c.WebSearchModel = stripProviderPrefix(strings.TrimSpace(*src.WebSearchModel))
+	}
+	if src.WebSearchMode != nil {
+		c.WebSearchMode = normalizeWebSearchMode(*src.WebSearchMode)
+	}
+	if src.WebSearchBaseURL != nil {
+		c.WebSearchBaseURL = strings.TrimRight(strings.TrimSpace(*src.WebSearchBaseURL), "/")
+	}
+	if src.WebSearchAPIKey != nil && strings.TrimSpace(*src.WebSearchAPIKey) != "" {
+		c.WebSearchAPIKey = strings.TrimSpace(*src.WebSearchAPIKey)
 	}
 	if src.LogRequests != nil {
 		c.LogRequests = *src.LogRequests

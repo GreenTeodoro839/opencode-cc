@@ -27,6 +27,10 @@ export default function Settings() {
   const [maxBody, setMaxBody] = useState(16384);
   const [timeout, setTimeoutSecs] = useState(0);
   const [requireKey, setRequireKey] = useState(false);
+  const [webSearchModel, setWebSearchModel] = useState("");
+  const [webSearchMode, setWebSearchMode] = useState("auto");
+  const [webSearchBaseURL, setWebSearchBaseURL] = useState("");
+  const [webSearchAPIKey, setWebSearchAPIKey] = useState("");
   const [promptCache, setPromptCache] = useState(true);
   const [promptCacheKeyPrefix, setPromptCacheKeyPrefix] = useState("opencode-cc");
   const [promptCacheAnthropicControl, setPromptCacheAnthropicControl] = useState(true);
@@ -49,6 +53,10 @@ export default function Settings() {
       setMaxBody(c.max_body_log_bytes);
       setTimeoutSecs(c.request_timeout_seconds);
       setRequireKey(c.require_api_key);
+      setWebSearchModel(c.web_search_model || "");
+      setWebSearchMode(c.web_search_mode || "auto");
+      setWebSearchBaseURL(c.web_search_base_url || "");
+      setWebSearchAPIKey("");
       setPromptCache(c.prompt_cache_enabled);
       setPromptCacheKeyPrefix(c.prompt_cache_key_prefix || "opencode-cc");
       setPromptCacheAnthropicControl(c.prompt_cache_anthropic_control);
@@ -96,6 +104,10 @@ export default function Settings() {
         max_body_log_bytes: maxBody,
         request_timeout_seconds: timeout,
         require_api_key: requireKey,
+        web_search_model: webSearchModel.trim(),
+        web_search_mode: webSearchMode,
+        web_search_base_url: webSearchBaseURL.trim(),
+        web_search_api_key: webSearchAPIKey.trim(),
         prompt_cache_enabled: promptCache,
         prompt_cache_key_prefix: promptCacheKeyPrefix,
         prompt_cache_anthropic_control: promptCacheAnthropicControl,
@@ -110,6 +122,8 @@ export default function Settings() {
       };
       const updated = await api.putConfig(body);
       setCfg(updated);
+      setWebSearchBaseURL(updated.web_search_base_url || "");
+      setWebSearchAPIKey("");
       // Refresh masked key views from the server response.
       if (updated.upstreams) {
         setUpstreams(
@@ -364,6 +378,81 @@ export default function Settings() {
                 setDirty(true);
               }}
             />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-4 mt-4">
+          <div>
+            <label className="label">Web Search 模式</label>
+            <select
+              className="input"
+              value={webSearchMode}
+              onChange={(e) => {
+                setWebSearchMode(e.target.value);
+                setDirty(true);
+              }}
+            >
+              <option value="auto">Auto</option>
+              <option value="native">Native</option>
+              <option value="translate">Translate</option>
+            </select>
+            <p className="text-xs text-slate-500 mt-2">
+              Native 可使用独立 Anthropic 上游；Translate 使用代理搜索并整理结果。
+            </p>
+          </div>
+          <div>
+            <label className="label">Web Search 模型（留空 = 沿用主模型）</label>
+            <input
+              className="input font-mono"
+              placeholder="例如：deepseek-v4-flash / glm-5-air"
+              value={webSearchModel}
+              onChange={(e) => {
+                setWebSearchModel(e.target.value);
+                setDirty(true);
+              }}
+            />
+            <p className="text-xs text-slate-500 mt-2">
+              Native 和 Translate 都会使用；留空时沿用主模型。
+            </p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-4 mt-4">
+          <div>
+            <label className="label">Web Search 原生上游</label>
+            <input
+              className="input font-mono"
+              placeholder="https://api.deepseek.com/anthropic"
+              value={webSearchBaseURL}
+              onChange={(e) => {
+                setWebSearchBaseURL(e.target.value);
+                setDirty(true);
+              }}
+            />
+            <p className="text-xs text-slate-500 mt-2">
+              仅 Native 模式使用；留空时复用主上游。
+            </p>
+          </div>
+          <div>
+            <label className="label">
+              Web Search API Key
+              {cfg?.web_search_api_key_set ? (
+                <span className="ml-2 text-xs text-slate-500">已设置 {cfg.web_search_api_key_masked}</span>
+              ) : null}
+            </label>
+            <input
+              className="input font-mono"
+              placeholder={cfg?.web_search_api_key_set ? "留空 = 保持当前 key" : "DeepSeek API key"}
+              type="password"
+              value={webSearchAPIKey}
+              onChange={(e) => {
+                setWebSearchAPIKey(e.target.value);
+                setDirty(true);
+              }}
+            />
+            <p className="text-xs text-slate-500 mt-2">
+              留空不会覆盖已保存的搜索专用 key。
+            </p>
           </div>
         </div>
       </Card>

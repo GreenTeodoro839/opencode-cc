@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	cfgpkg "github.com/Kiowx/opencode-cc/internal/config"
 	"github.com/Kiowx/opencode-cc/internal/proxy"
 	"github.com/Kiowx/opencode-cc/internal/store"
 )
@@ -49,7 +50,17 @@ func (s *Server) Proxy() http.HandlerFunc {
 			return
 		}
 
-		if nativeAnthropic && proxy.IsNativeAnthropicModel(targetModel) {
+		hasWebSearch := shouldUseWebSearchShim(&areq)
+		webSearchMode := cfg.ResolveWebSearchMode()
+		if hasWebSearch && webSearchMode == cfgpkg.WebSearchModeNative {
+			searchUpstream, searchKey := cfg.ResolveWebSearchUpstream(upstream, zenKey)
+			searchModel := cfg.ResolveWebSearchModel(targetModel)
+			s.proxyNativeAnthropic(w, r, body, &areq, searchUpstream, searchKey, searchModel, timeoutSeconds, start)
+			return
+		}
+
+		if nativeAnthropic && proxy.IsNativeAnthropicModel(targetModel) &&
+			!(hasWebSearch && webSearchMode == cfgpkg.WebSearchModeTranslate) {
 			s.proxyNativeAnthropic(w, r, body, &areq, upstream, zenKey, targetModel, timeoutSeconds, start)
 			return
 		}
@@ -57,6 +68,9 @@ func (s *Server) Proxy() http.HandlerFunc {
 		oreq := proxy.ConvertRequest(&areq, func(string) string { return targetModel })
 		applyThinkingBudgetMapping(oreq, &areq, targetModel, cfg)
 		proxy.ApplyOpenAIPromptCache(oreq, promptCacheOptionsFromConfig(cfg))
+		if s.handleWebSearchShim(w, r, body, &areq, oreq, upstream, zenKey, targetModel, cfg, timeoutSeconds, start) {
+			return
+		}
 
 		// Marshal the upstream request.
 		upBody, err := json.Marshal(oreq)

@@ -10,21 +10,23 @@ import (
 
 // OpenAIRequest is POST /v1/chat/completions.
 type OpenAIRequest struct {
-	Model             string               `json:"model"`
-	Messages          []OpenAIMessage      `json:"messages"`
-	MaxTokens         *int                 `json:"max_tokens,omitempty"`
-	Temperature       *float64             `json:"temperature,omitempty"`
-	TopP              *float64             `json:"top_p,omitempty"`
-	Stream            bool                 `json:"stream,omitempty"`
-	StreamOptions     *OpenAIStreamOptions `json:"stream_options,omitempty"`
-	Stop              []string             `json:"stop,omitempty"`
-	Tools             []OpenAITool         `json:"tools,omitempty"`
-	ToolChoice        any                  `json:"tool_choice,omitempty"`
-	ParallelToolCalls *bool                `json:"parallel_tool_calls,omitempty"`
-	PromptCacheKey    string               `json:"prompt_cache_key,omitempty"`
-	ReasoningEffort   string               `json:"reasoning_effort,omitempty"`
-	ThinkingBudget    *int                 `json:"thinking_budget,omitempty"`
-	Thinking          *OpenAIThinking      `json:"thinking,omitempty"`
+	Model                string               `json:"model"`
+	Messages             []OpenAIMessage      `json:"messages"`
+	MaxTokens            *int                 `json:"max_tokens,omitempty"`
+	Temperature          *float64             `json:"temperature,omitempty"`
+	TopP                 *float64             `json:"top_p,omitempty"`
+	Stream               bool                 `json:"stream,omitempty"`
+	StreamOptions        *OpenAIStreamOptions `json:"stream_options,omitempty"`
+	Stop                 []string             `json:"stop,omitempty"`
+	Tools                []OpenAITool         `json:"tools,omitempty"`
+	ToolChoice           any                  `json:"tool_choice,omitempty"`
+	ParallelToolCalls    *bool                `json:"parallel_tool_calls,omitempty"`
+	PromptCacheKey       string               `json:"prompt_cache_key,omitempty"`
+	PromptCacheRetention string               `json:"prompt_cache_retention,omitempty"`
+	PromptCacheHint      string               `json:"-"`
+	ReasoningEffort      string               `json:"reasoning_effort,omitempty"`
+	ThinkingBudget       *int                 `json:"thinking_budget,omitempty"`
+	Thinking             *OpenAIThinking      `json:"thinking,omitempty"`
 }
 
 // OpenAIThinking carries provider-specific thinking controls used by GLM.
