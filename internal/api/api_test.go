@@ -414,3 +414,55 @@ func TestTestUpstreamSupportsAnthropicProtocol(t *testing.T) {
 		t.Fatalf("upstream result wrong: %+v", out.Upstreams)
 	}
 }
+
+func TestTestUpstreamExpandsWildcardModelRoute(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if body.Model != "deepseek-chat" {
+			t.Fatalf("probe model = %q, want deepseek-chat", body.Model)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"choices":[{"message":{"content":"pong"}}],
+			"usage":{"prompt_tokens":1,"completion_tokens":2}
+		}`))
+	}))
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.Upstreams = []config.Upstream{{
+		BaseURL:  upstream.URL,
+		APIKey:   "test-key",
+		Enabled:  true,
+		Protocol: config.UpstreamProtocolOpenAI,
+		Models:   []config.UpstreamModel{{Name: "*"}},
+	}}
+	mux := newTestAPI(t, cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/test?model=deepseek-chat", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		OK        bool   `json:"ok"`
+		Model     string `json:"model"`
+		Upstreams []struct {
+			Model string `json:"model"`
+		} `json:"upstreams"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !out.OK || out.Model != "deepseek-chat" ||
+		len(out.Upstreams) != 1 || out.Upstreams[0].Model != "deepseek-chat" {
+		t.Fatalf("unexpected probe result: %+v", out)
+	}
+}

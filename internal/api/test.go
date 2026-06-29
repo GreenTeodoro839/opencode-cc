@@ -266,14 +266,21 @@ func probeTargetModel(models []config.UpstreamModel, requested string) string {
 			alias = target
 		}
 		match := stripProbePrefix(strings.TrimSpace(m.Match))
-		if requested == "" ||
-			requested == alias ||
-			requested == target ||
-			(match != "" && (match == "*" || strings.HasPrefix(requested, strings.TrimSuffix(match, "*")))) {
-			return target
+		var wildcard string
+		var ok bool
+		switch {
+		case requested == "":
+			ok = true
+		case match != "":
+			wildcard, ok = probePatternMatch(match, requested, true)
+		default:
+			wildcard, ok = probePatternMatch(alias, requested, false)
+		}
+		if ok {
+			return expandProbeTarget(target, requested, wildcard)
 		}
 	}
-	return probeModelTarget(models[0])
+	return expandProbeTarget(probeModelTarget(models[0]), requested, "")
 }
 
 func probeModelTarget(m config.UpstreamModel) string {
@@ -281,6 +288,75 @@ func probeModelTarget(m config.UpstreamModel) string {
 		return name
 	}
 	return stripProbePrefix(strings.TrimSpace(m.Target))
+}
+
+func expandProbeTarget(target, requested, wildcard string) string {
+	target = stripProbePrefix(strings.TrimSpace(target))
+	if !strings.Contains(target, "*") {
+		return target
+	}
+	if wildcard == "" {
+		wildcard = requested
+	}
+	return strings.ReplaceAll(target, "*", wildcard)
+}
+
+func probePatternMatch(pattern, requested string, prefixMatch bool) (string, bool) {
+	pattern = stripProbePrefix(strings.TrimSpace(pattern))
+	if pattern == "" {
+		return "", false
+	}
+	if wildcard, ok := probeWildcardCapture(pattern, requested); ok {
+		return wildcard, true
+	}
+	if strings.Contains(pattern, "*") {
+		return "", false
+	}
+	if prefixMatch {
+		return "", strings.HasPrefix(requested, pattern)
+	}
+	return "", requested == pattern
+}
+
+func probeWildcardCapture(pattern, value string) (string, bool) {
+	if !strings.Contains(pattern, "*") {
+		return "", false
+	}
+	if pattern == "*" {
+		return value, true
+	}
+	if strings.Count(pattern, "*") != 1 {
+		return "", probeGlobMatches(pattern, value)
+	}
+	parts := strings.SplitN(pattern, "*", 2)
+	prefix, suffix := parts[0], parts[1]
+	if !strings.HasPrefix(value, prefix) || !strings.HasSuffix(value, suffix) {
+		return "", false
+	}
+	if len(value) < len(prefix)+len(suffix) {
+		return "", false
+	}
+	return value[len(prefix) : len(value)-len(suffix)], true
+}
+
+func probeGlobMatches(pattern, value string) bool {
+	parts := strings.Split(pattern, "*")
+	pos := 0
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		idx := strings.Index(value[pos:], part)
+		if idx < 0 {
+			return false
+		}
+		if i == 0 && !strings.HasPrefix(value, part) {
+			return false
+		}
+		pos += idx + len(part)
+	}
+	last := parts[len(parts)-1]
+	return last == "" || strings.HasSuffix(value, last)
 }
 
 func probeProtocol(protocol string) string {

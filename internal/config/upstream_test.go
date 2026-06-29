@@ -192,6 +192,54 @@ func TestResolveRequestRouteUsesExplicitUpstreamModels(t *testing.T) {
 	}
 }
 
+func TestResolveRequestRouteExpandsWildcardModelName(t *testing.T) {
+	c := Default()
+	c.Upstreams = []Upstream{{
+		BaseURL:  "https://wildcard.example",
+		APIKey:   "wildcard-key",
+		Enabled:  true,
+		Protocol: UpstreamProtocolAnthropic,
+		Models: []UpstreamModel{{
+			Name: "*",
+		}},
+	}}
+
+	route, ok := c.ResolveRequestRoute("anthropic/deepseek-chat")
+	if !ok {
+		t.Fatal("wildcard route not found")
+	}
+	if route.TargetModel != "deepseek-chat" {
+		t.Fatalf("target model = %q, want deepseek-chat", route.TargetModel)
+	}
+	if route.BaseURL != "https://wildcard.example" || route.APIKey != "wildcard-key" {
+		t.Fatalf("unexpected route: %+v", route)
+	}
+}
+
+func TestResolveRequestRouteExpandsWildcardAliasIntoTarget(t *testing.T) {
+	c := Default()
+	c.Upstreams = []Upstream{{
+		BaseURL: "https://template.example",
+		APIKey:  "template-key",
+		Enabled: true,
+		Models: []UpstreamModel{{
+			Alias: "claude-*",
+			Name:  "deepseek-*",
+		}},
+	}}
+
+	route, ok := c.ResolveRequestRoute("claude-sonnet")
+	if !ok {
+		t.Fatal("template route not found")
+	}
+	if route.TargetModel != "deepseek-sonnet" {
+		t.Fatalf("target model = %q, want deepseek-sonnet", route.TargetModel)
+	}
+	if _, ok := c.ResolveRequestRoute("glm-4.6"); ok {
+		t.Fatal("non-matching model should not use wildcard template route")
+	}
+}
+
 func TestExplicitModelAliases(t *testing.T) {
 	c := Default()
 	c.Upstreams = []Upstream{
@@ -215,5 +263,24 @@ func TestExplicitModelAliases(t *testing.T) {
 	got := c.ExplicitModelAliases()
 	if len(got) != 2 || got[0] != "claude-sonnet" || got[1] != "glm-4.6" {
 		t.Fatalf("aliases = %+v", got)
+	}
+}
+
+func TestExplicitModelAliasesSkipsWildcardRoutes(t *testing.T) {
+	c := Default()
+	c.Upstreams = []Upstream{{
+		BaseURL: "https://wildcard.example",
+		APIKey:  "wildcard-key",
+		Enabled: true,
+		Models: []UpstreamModel{
+			{Name: "*"},
+			{Alias: "claude-*", Name: "deepseek-*"},
+			{Alias: "glm-coder", Name: "glm-4.6"},
+		},
+	}}
+
+	got := c.ExplicitModelAliases()
+	if len(got) != 1 || got[0] != "glm-coder" {
+		t.Fatalf("aliases = %+v, want only glm-coder", got)
 	}
 }

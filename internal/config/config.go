@@ -354,7 +354,7 @@ func (c *Config) ExplicitModelAliases() []string {
 		}
 		for _, m := range u.Models {
 			alias := upstreamModelAlias(m)
-			if alias == "" || seen[alias] {
+			if alias == "" || strings.Contains(alias, "*") || seen[alias] {
 				continue
 			}
 			seen[alias] = true
@@ -761,10 +761,11 @@ func (c *Config) explicitRouteLocked(in string) (ResolvedUpstream, bool) {
 			continue
 		}
 		for _, m := range u.Models {
-			if !upstreamModelMatches(m, in, bare) {
+			match, ok := upstreamModelMatches(m, in, bare)
+			if !ok {
 				continue
 			}
-			target := upstreamModelTarget(m)
+			target := expandUpstreamModelTarget(upstreamModelTarget(m), bare, match)
 			if target == "" {
 				target = bare
 			}
@@ -786,13 +787,17 @@ func (c *Config) explicitRouteLocked(in string) (ResolvedUpstream, bool) {
 	return ResolvedUpstream{}, false
 }
 
-func upstreamModelMatches(m UpstreamModel, in, bare string) bool {
+type upstreamModelMatch struct {
+	Wildcard string
+}
+
+func upstreamModelMatches(m UpstreamModel, in, bare string) (upstreamModelMatch, bool) {
 	if pattern := strings.TrimSpace(m.Match); pattern != "" {
 		return modelPatternMatches(pattern, in, bare)
 	}
 	alias := upstreamModelAlias(m)
 	if alias == "" {
-		return false
+		return upstreamModelMatch{}, false
 	}
 	return modelNameMatches(alias, in, bare)
 }
@@ -814,29 +819,121 @@ func upstreamModelTarget(m UpstreamModel) string {
 	return stripProviderPrefix(strings.TrimSpace(m.Target))
 }
 
-func modelPatternMatches(pattern, in, bare string) bool {
-	pattern = strings.TrimSpace(pattern)
-	if pattern == "*" {
-		return true
+func expandUpstreamModelTarget(target, bare string, match upstreamModelMatch) string {
+	target = stripProviderPrefix(strings.TrimSpace(target))
+	if target == "" {
+		return ""
 	}
-	if strings.HasSuffix(pattern, "*") {
-		prefix := strings.TrimSuffix(pattern, "*")
-		barePrefix := stripProviderPrefix(prefix)
-		return strings.HasPrefix(in, prefix) || strings.HasPrefix(bare, prefix) ||
-			strings.HasPrefix(in, barePrefix) || strings.HasPrefix(bare, barePrefix)
+	if !strings.Contains(target, "*") {
+		return target
 	}
-	barePattern := stripProviderPrefix(pattern)
-	return strings.HasPrefix(in, pattern) || strings.HasPrefix(bare, pattern) ||
-		strings.HasPrefix(in, barePattern) || strings.HasPrefix(bare, barePattern)
+	replacement := match.Wildcard
+	if replacement == "" {
+		replacement = bare
+	}
+	if replacement == "" {
+		return ""
+	}
+	return strings.ReplaceAll(target, "*", replacement)
 }
 
-func modelNameMatches(name, in, bare string) bool {
+func modelPatternMatches(pattern, in, bare string) (upstreamModelMatch, bool) {
+	pattern = strings.TrimSpace(pattern)
+	for _, value := range modelMatchCandidates(pattern, in, bare) {
+		if wildcard, ok := modelWildcardCapture(pattern, value); ok {
+			return upstreamModelMatch{Wildcard: wildcard}, true
+		}
+	}
+	if strings.Contains(pattern, "*") {
+		barePattern := stripProviderPrefix(pattern)
+		for _, value := range modelMatchCandidates(barePattern, in, bare) {
+			if wildcard, ok := modelWildcardCapture(barePattern, value); ok {
+				return upstreamModelMatch{Wildcard: wildcard}, true
+			}
+		}
+		return upstreamModelMatch{}, false
+	}
+	barePattern := stripProviderPrefix(pattern)
+	if strings.HasPrefix(in, pattern) || strings.HasPrefix(bare, pattern) ||
+		strings.HasPrefix(in, barePattern) || strings.HasPrefix(bare, barePattern) {
+		return upstreamModelMatch{}, true
+	}
+	return upstreamModelMatch{}, false
+}
+
+func modelNameMatches(name, in, bare string) (upstreamModelMatch, bool) {
 	name = strings.TrimSpace(name)
-	if name == "*" {
-		return true
+	for _, value := range modelMatchCandidates(name, in, bare) {
+		if wildcard, ok := modelWildcardCapture(name, value); ok {
+			return upstreamModelMatch{Wildcard: wildcard}, true
+		}
+	}
+	if strings.Contains(name, "*") {
+		bareName := stripProviderPrefix(name)
+		for _, value := range modelMatchCandidates(bareName, in, bare) {
+			if wildcard, ok := modelWildcardCapture(bareName, value); ok {
+				return upstreamModelMatch{Wildcard: wildcard}, true
+			}
+		}
+		return upstreamModelMatch{}, false
 	}
 	bareName := stripProviderPrefix(name)
-	return in == name || bare == name || in == bareName || bare == bareName
+	if in == name || bare == name || in == bareName || bare == bareName {
+		return upstreamModelMatch{}, true
+	}
+	return upstreamModelMatch{}, false
+}
+
+func modelMatchCandidates(pattern, in, bare string) []string {
+	if strings.Contains(pattern, "/") {
+		return []string{in, bare}
+	}
+	return []string{bare, in}
+}
+
+func modelWildcardCapture(pattern, value string) (string, bool) {
+	pattern = strings.TrimSpace(pattern)
+	if !strings.Contains(pattern, "*") {
+		return "", false
+	}
+	if pattern == "*" {
+		return value, true
+	}
+	if strings.Count(pattern, "*") != 1 {
+		return "", modelGlobMatches(pattern, value)
+	}
+	parts := strings.SplitN(pattern, "*", 2)
+	prefix, suffix := parts[0], parts[1]
+	if !strings.HasPrefix(value, prefix) || !strings.HasSuffix(value, suffix) {
+		return "", false
+	}
+	if len(value) < len(prefix)+len(suffix) {
+		return "", false
+	}
+	return value[len(prefix) : len(value)-len(suffix)], true
+}
+
+func modelGlobMatches(pattern, value string) bool {
+	parts := strings.Split(pattern, "*")
+	if len(parts) == 0 {
+		return value == ""
+	}
+	pos := 0
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		idx := strings.Index(value[pos:], part)
+		if idx < 0 {
+			return false
+		}
+		if i == 0 && !strings.HasPrefix(value, part) {
+			return false
+		}
+		pos += idx + len(part)
+	}
+	last := parts[len(parts)-1]
+	return last == "" || strings.HasSuffix(value, last)
 }
 
 func normalizeUpstreamModels(in []UpstreamModel) []UpstreamModel {
