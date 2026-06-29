@@ -238,6 +238,28 @@ Codex 请求 `/v1/responses` 时，代理会按目标模型智能选择上游：
   "upstream_base": "https://opencode.ai/zen",
   "native_anthropic": true,   // true 时 claude-* / qwen* 目标模型智能直连 <upstream_base>/v1/messages
   "zen_api_key": "",           // Bearer token，必填
+  "upstreams": [
+    {
+      "name": "deepseek-anthropic",
+      "base_url": "https://api.deepseek.com/anthropic",
+      "api_key": "",
+      "enabled": true,
+      "protocol": "anthropic", // auto / openai / anthropic
+      "models": [
+        { "alias": "claude-sonnet", "name": "deepseek-chat" }
+      ]
+    },
+    {
+      "name": "glm-openai",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "api_key": "",
+      "enabled": true,
+      "protocol": "openai",
+      "models": [
+        { "alias": "glm-coder", "name": "glm-4.6" }
+      ]
+    }
+  ],
   "panel_token": "",           // 控制面板登录密码；"" = 开放（本地用）
   "require_api_key": false,    // true 时 /v1/* 必须携带有效 API Key
   "default_model": "glm-4.6",
@@ -261,7 +283,10 @@ Codex 请求 `/v1/responses` 时，代理会按目标模型智能选择上游：
 }
 ```
 
-所有字段都可在 **Config** 标签页编辑，保存后桥接器热更新（重建上游客户端），无需重启。未在映射表里的 model 字符串原样转发给 Zen。
+所有字段都可在 **Config** 标签页编辑，保存后桥接器热更新（重建上游客户端），无需重启。
+`upstreams[].models` 采用类似 CLIProxyAPI 的 `alias -> name` 方式：客户端只看到/请求 `alias`，代理转发时只把 `model` 改成上游真实 `name`。只要任一启用上游配置了模型表，请求就按模型表显式路由，不再对多个上游做 round-robin，未匹配模型会被拒绝；未配置模型表时才沿用旧的 `model_mappings` + 上游轮询兼容行为。
+
+`protocol:"anthropic"` 会把 Anthropic Messages 请求直传到上游 `/v1/messages`，保留 `cache_control`、`web_search_*` server tool、metadata 和其它扩展字段，只替换 `model`。`protocol:"openai"` 走 `/v1/chat/completions` 翻译路径，`protocol:"auto"` 保持原来的 `native_anthropic` 智能判断。
 
 OpenAI 兼容的推理模型如果返回 `reasoning_content`，代理会把它转换成 Anthropic `thinking` 块，并在下一轮请求中作为 `reasoning_content` 回传给上游，满足 DeepSeek / GLM 等模型的 thinking mode 连续对话要求。`thinking_budget_mappings` 只给明确匹配的模型追加思考控制字段：GLM 默认发送 `thinking:{"type":"enabled","clear_thinking":false}`，Kimi/Moonshot 默认发送 `thinking_budget`，DeepSeek 默认不发送 `thinking_budget`，避免触发不兼容参数。
 

@@ -291,6 +291,8 @@ func publicConfig(c *config.Config) map[string]any {
 			"api_key_set":    u.APIKey != "",
 			"name":           u.Name,
 			"enabled":        u.Enabled,
+			"protocol":       u.Protocol,
+			"models":         u.Models,
 		})
 	}
 	return map[string]any{

@@ -120,7 +120,7 @@ func TestOpenAIChatCompletionsNonStream(t *testing.T) {
 
 func TestPrepareOpenAIRequestSortsTools(t *testing.T) {
 	srv, _, _ := newOpenAITestServer(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	upBody, incoming, target, stream, err := srv.prepareOpenAIRequest([]byte(`{
+	upBody, incoming, target, stream, _, routeOK, err := srv.prepareOpenAIRequest([]byte(`{
 		"model":"client-model",
 		"messages":[{"role":"user","content":"hi"}],
 		"tools":[
@@ -128,12 +128,12 @@ func TestPrepareOpenAIRequestSortsTools(t *testing.T) {
 			{"type":"function","function":{"name":"a_tool","parameters":{"type":"object"}}},
 			{"type":"web_search"}
 		]
-	}`))
+	}`), srv.cfg.Snapshot())
 	if err != nil {
 		t.Fatalf("prepare request: %v", err)
 	}
-	if incoming != "client-model" || target != "glm-5.1" || stream {
-		t.Fatalf("unexpected request metadata: incoming=%q target=%q stream=%v", incoming, target, stream)
+	if incoming != "client-model" || target != "glm-5.1" || stream || !routeOK {
+		t.Fatalf("unexpected request metadata: incoming=%q target=%q stream=%v routeOK=%v", incoming, target, stream, routeOK)
 	}
 	var out struct {
 		PromptCacheKey string `json:"prompt_cache_key"`

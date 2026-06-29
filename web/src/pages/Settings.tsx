@@ -10,8 +10,17 @@ interface UpstreamRow {
   api_key: string;
   name: string;
   enabled: boolean;
+  protocol: string;
+  models: UpstreamModelRow[];
   api_key_set: boolean;
   api_key_masked: string;
+}
+
+interface UpstreamModelRow {
+  name: string;
+  alias: string;
+  match?: string;
+  target?: string;
 }
 
 const ZEN_BASES = [
@@ -67,6 +76,13 @@ export default function Settings() {
         api_key: "",
         name: u.name,
         enabled: u.enabled,
+        protocol: u.protocol || "auto",
+        models: (u.models || []).map((m) => ({
+          name: m.name || m.target || "",
+          alias: m.alias || (m.match && m.match !== "*" ? m.match : ""),
+          match: m.match,
+          target: m.target,
+        })),
         api_key_set: u.api_key_set,
         api_key_masked: u.api_key_masked,
       }));
@@ -118,6 +134,15 @@ export default function Settings() {
           api_key: u.api_key.trim(),
           name: u.name,
           enabled: u.enabled,
+          protocol: u.protocol || "auto",
+          models: u.models
+            .map((m) => ({
+              name: m.name.trim(),
+              alias: m.alias.trim(),
+              match: (m.match || "").trim(),
+              target: (m.target || "").trim(),
+            }))
+            .filter((m) => m.name || m.alias || m.match || m.target),
         })),
       };
       const updated = await api.putConfig(body);
@@ -132,6 +157,13 @@ export default function Settings() {
             api_key: "",
             name: u.name,
             enabled: u.enabled,
+            protocol: u.protocol || "auto",
+            models: (u.models || []).map((m) => ({
+              name: m.name || m.target || "",
+              alias: m.alias || (m.match && m.match !== "*" ? m.match : ""),
+              match: m.match,
+              target: m.target,
+            })),
             api_key_set: u.api_key_set,
             api_key_masked: u.api_key_masked,
           }))
@@ -158,6 +190,8 @@ export default function Settings() {
         api_key: "",
         name: "",
         enabled: true,
+        protocol: "auto",
+        models: [],
         api_key_set: false,
         api_key_masked: "",
       },
@@ -166,6 +200,39 @@ export default function Settings() {
   }
   function removeUpstream(i: number) {
     setUpstreams((prev) => prev.filter((_, idx) => idx !== i));
+    setDirty(true);
+  }
+  function updateModel(upstreamIndex: number, modelIndex: number, patch: Partial<UpstreamModelRow>) {
+    setUpstreams((prev) =>
+      prev.map((u, idx) =>
+        idx === upstreamIndex
+          ? {
+              ...u,
+              models: u.models.map((m, j) => (j === modelIndex ? { ...m, ...patch } : m)),
+            }
+          : u
+      )
+    );
+    setDirty(true);
+  }
+  function addModel(upstreamIndex: number) {
+    setUpstreams((prev) =>
+      prev.map((u, idx) =>
+        idx === upstreamIndex
+          ? { ...u, models: [...u.models, { alias: "", name: "" }] }
+          : u
+      )
+    );
+    setDirty(true);
+  }
+  function removeModel(upstreamIndex: number, modelIndex: number) {
+    setUpstreams((prev) =>
+      prev.map((u, idx) =>
+        idx === upstreamIndex
+          ? { ...u, models: u.models.filter((_, j) => j !== modelIndex) }
+          : u
+      )
+    );
     setDirty(true);
   }
 
@@ -197,7 +264,7 @@ export default function Settings() {
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <KeyIcon />
-            <h3 className="text-sm font-semibold text-slate-200">上游凭据（轮询）</h3>
+            <h3 className="text-sm font-semibold text-slate-200">上游与模型路由</h3>
             {upstreams.filter((u) => u.enabled && (u.api_key_set || u.api_key.trim())).length > 0 ? (
               <Badge tone="green">{upstreams.filter((u) => u.enabled && (u.api_key_set || u.api_key.trim())).length} 个可用</Badge>
             ) : (
@@ -210,7 +277,7 @@ export default function Settings() {
         </div>
 
         <p className="text-xs text-slate-500 mb-4">
-          支持多个上游 API Key 按请求轮询。Base URL 可从下拉选预设（
+          为每个上游指定协议和接入模型。只要任一上游配置了模型表，请求会按 alias 精确路由，不再按请求轮询。Base URL 可从下拉选预设（
           <span className="font-mono text-slate-400">/zen/go</span> go 套餐、
           <span className="font-mono text-slate-400">/zen/</span> 默认），或选「自定义」填任意 OpenAI 兼容端点。Key 仅本地保存，除转发给上游外不会外发。
         </p>
@@ -298,6 +365,61 @@ export default function Settings() {
                     </button>
                     <span className="text-xs text-slate-400">启用</span>
                   </label>
+                </div>
+                <div className="mt-3 grid grid-cols-1 sm:grid-cols-[180px_1fr] gap-3">
+                  <div>
+                    <label className="label">上游协议</label>
+                    <select
+                      className="input"
+                      value={u.protocol || "auto"}
+                      onChange={(e) => updateUpstream(i, { protocol: e.target.value })}
+                    >
+                      <option value="auto">Auto</option>
+                      <option value="openai">OpenAI Chat</option>
+                      <option value="anthropic">Anthropic Messages</option>
+                    </select>
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <label className="label">模型路由</label>
+                      <button onClick={() => addModel(i)} className="btn-ghost !py-1 !text-xs">
+                        + 模型
+                      </button>
+                    </div>
+                    {u.models.length === 0 ? (
+                      <div className="rounded-lg border border-white/[0.05] bg-ink-900/40 px-3 py-2 text-xs text-slate-500">
+                        未配置模型表时沿用旧映射与轮询；配置后只接入表内 alias。
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {u.models.map((m, j) => (
+                          <div key={j} className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-2">
+                            <input
+                              className="input font-mono"
+                              placeholder="客户端 alias，例如 claude-sonnet"
+                              value={m.alias}
+                              onChange={(e) => updateModel(i, j, { alias: e.target.value })}
+                            />
+                            <input
+                              className="input font-mono"
+                              placeholder="上游 model，例如 deepseek-chat"
+                              value={m.name}
+                              onChange={(e) => updateModel(i, j, { name: e.target.value })}
+                            />
+                            <button
+                              onClick={() => removeModel(i, j)}
+                              className="btn-ghost !px-2.5 text-slate-500 hover:text-accent-red"
+                              title="删除模型"
+                            >
+                              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <path d="M18 6 6 18M6 6l12 12" strokeLinecap="round" />
+                              </svg>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             ))}

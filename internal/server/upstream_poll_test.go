@@ -126,3 +126,40 @@ func TestModelsEndpointUsesPairedRoundRobinUpstream(t *testing.T) {
 		t.Fatalf("models endpoint did not use paired upstream credentials: %s", raw)
 	}
 }
+
+func TestModelsEndpointUsesExplicitAliases(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("upstream /v1/models should not be called when explicit aliases exist")
+	}))
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.Upstreams = []config.Upstream{{
+		BaseURL: upstream.URL,
+		APIKey:  "key",
+		Enabled: true,
+		Models: []config.UpstreamModel{
+			{Name: "deepseek-chat", Alias: "claude-sonnet"},
+			{Name: "glm-4.6"},
+		},
+	}}
+	srv, _ := newTestServerWithCfg(t, cfg)
+	httpSrv := httptest.NewServer(srv.Handler(nil, nil))
+	defer httpSrv.Close()
+
+	resp, err := http.Get(httpSrv.URL + "/v1/models")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", resp.StatusCode, raw)
+	}
+	body := string(raw)
+	if !strings.Contains(body, `"id":"claude-sonnet"`) ||
+		!strings.Contains(body, `"id":"glm-4.6"`) ||
+		strings.Contains(body, `"id":"deepseek-chat"`) {
+		t.Fatalf("models endpoint did not expose configured aliases only: %s", body)
+	}
+}

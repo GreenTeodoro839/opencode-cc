@@ -88,6 +88,26 @@ func PrepareAnthropicPromptCacheBody(body []byte, targetModel string, opts Promp
 	return out, nil
 }
 
+// PrepareAnthropicPassthroughBody rewrites only the model field and keeps every
+// other Anthropic request field as raw JSON. Native Anthropic upstreams use
+// this path so cache_control, beta fields, web_search tools, and provider
+// extensions are not normalized or dropped by the proxy.
+func PrepareAnthropicPassthroughBody(body []byte, targetModel string) ([]byte, error) {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("request body is not valid Anthropic JSON: %w", err)
+	}
+	if payload == nil {
+		return nil, fmt.Errorf("request body must be a JSON object")
+	}
+	payload["model"], _ = json.Marshal(targetModel)
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("could not encode upstream request: %w", err)
+	}
+	return out, nil
+}
+
 func normalizeOpenAIMessagePrefix(messages []OpenAIMessage) []OpenAIMessage {
 	if len(messages) < 2 {
 		return messages

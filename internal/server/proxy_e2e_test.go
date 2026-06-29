@@ -801,6 +801,143 @@ func TestProxyNativeAnthropicNonStream(t *testing.T) {
 	})
 }
 
+func TestProxyExplicitAnthropicUpstreamRoutesByModel(t *testing.T) {
+	var hitsA, hitsB int
+	var gotBody map[string]json.RawMessage
+	upstreamA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitsA++
+		if r.URL.Path != "/v1/messages" {
+			t.Fatalf("upstream A path = %q, want /v1/messages", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer key-A" || r.Header.Get("x-api-key") != "key-A" {
+			t.Fatalf("upstream A auth headers wrong: auth=%q x-api-key=%q",
+				r.Header.Get("Authorization"), r.Header.Get("x-api-key"))
+		}
+		if r.Header.Get("anthropic-beta") != "tools-2024-04-04" {
+			t.Fatalf("anthropic-beta was not forwarded: %q", r.Header.Get("anthropic-beta"))
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode upstream A request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"id":"msg_explicit",
+			"type":"message",
+			"role":"assistant",
+			"model":"deepseek-chat",
+			"content":[{"type":"text","text":"explicit native"}],
+			"stop_reason":"end_turn",
+			"usage":{"input_tokens":5,"output_tokens":2,"cache_read_input_tokens":3}
+		}`)
+	}))
+	defer upstreamA.Close()
+	upstreamB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitsB++
+		t.Fatalf("upstream B should not be selected, request path %s", r.URL.Path)
+	}))
+	defer upstreamB.Close()
+
+	cfg := config.Default()
+	cfg.NativeAnthropic = false
+	cfg.Upstreams = []config.Upstream{
+		{
+			BaseURL:  upstreamA.URL,
+			APIKey:   "key-A",
+			Enabled:  true,
+			Protocol: config.UpstreamProtocolAnthropic,
+			Models: []config.UpstreamModel{{
+				Name:  "deepseek-chat",
+				Alias: "claude-sonnet",
+			}},
+		},
+		{
+			BaseURL:  upstreamB.URL,
+			APIKey:   "key-B",
+			Enabled:  true,
+			Protocol: config.UpstreamProtocolAnthropic,
+			Models: []config.UpstreamModel{{
+				Name:  "glm-4.6",
+				Alias: "glm-coder",
+			}},
+		},
+	}
+	srv, st := newTestServerWithCfg(t, cfg)
+
+	body := []byte(`{
+		"model":"anthropic/claude-sonnet",
+		"max_tokens":64,
+		"system":[{"type":"text","text":"stable","cache_control":{"type":"ephemeral"}}],
+		"tools":[{"type":"web_search_20250305","name":"web_search","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}],
+		"metadata":{"request_id":"must-stay","custom":{"nested":true}},
+		"provider_extension":{"keep":["all","raw"]}
+	}`)
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+		req.Header.Set("anthropic-beta", "tools-2024-04-04")
+		rec := httptest.NewRecorder()
+		srv.Proxy().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d status %d: %s", i, rec.Code, rec.Body.String())
+		}
+	}
+
+	if hitsA != 3 || hitsB != 0 {
+		t.Fatalf("explicit route hits A=%d B=%d, want 3/0", hitsA, hitsB)
+	}
+	var model string
+	if err := json.Unmarshal(gotBody["model"], &model); err != nil || model != "deepseek-chat" {
+		t.Fatalf("mapped model = %q, err=%v", model, err)
+	}
+	for key, want := range map[string][]byte{
+		"system":             []byte(`"cache_control"`),
+		"tools":              []byte(`"web_search_20250305"`),
+		"messages":           []byte(`"cache_control"`),
+		"metadata":           []byte(`"must-stay"`),
+		"provider_extension": []byte(`"all"`),
+	} {
+		if !bytes.Contains(gotBody[key], want) {
+			t.Fatalf("%s was not preserved: %s", key, gotBody[key])
+		}
+	}
+
+	waitForRequestLog(t, st, func(row store.RequestRow) bool {
+		return row.Path == "/v1/messages" &&
+			row.IncomingModel == "anthropic/claude-sonnet" &&
+			row.TargetModel == "deepseek-chat" &&
+			row.CachedInputTokens == 3
+	})
+}
+
+func TestProxyExplicitRoutesRejectUnconfiguredModel(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("upstream should not be called for unconfigured model")
+	}))
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.Upstreams = []config.Upstream{{
+		BaseURL:  upstream.URL,
+		APIKey:   "key",
+		Enabled:  true,
+		Protocol: config.UpstreamProtocolAnthropic,
+		Models:   []config.UpstreamModel{{Name: "deepseek-chat", Alias: "claude-sonnet"}},
+	}}
+	srv, _ := newTestServerWithCfg(t, cfg)
+
+	body := []byte(`{"model":"not-configured","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Proxy().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "not configured") {
+		t.Fatalf("unexpected error body: %s", rec.Body.String())
+	}
+}
+
 func TestProxyNativeAnthropicStream(t *testing.T) {
 	var expected strings.Builder
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

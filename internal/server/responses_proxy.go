@@ -39,18 +39,19 @@ func (s *Server) ResponsesProxy() http.HandlerFunc {
 			return
 		}
 		incomingModel := in.Model
-		targetModel := s.cfg.ResolveModel(incomingModel)
 		cfg := s.cfg.Snapshot()
-		upstream, zenKey, ok := s.cfg.NextUpstream()
+		route, ok := s.cfg.ResolveRequestRoute(incomingModel)
+		targetModel := route.TargetModel
 		if !ok {
-			const msg = "no upstream API key configured. Set one in the web panel (Settings → upstreams)."
-			writeOpenAIError(w, http.StatusUnauthorized, "authentication_error", msg)
+			status, errType, msg := s.routeErrorForOpenAI(incomingModel)
+			writeOpenAIError(w, status, errType, msg)
 			s.logFailed(r.Context(), r, incomingModel, targetModel, in.Stream,
-				http.StatusUnauthorized, "no upstream api key", body, time.Since(start))
+				status, msg, body, time.Since(start))
 			return
 		}
+		upstream, zenKey := route.BaseURL, route.APIKey
 
-		if cfg.NativeAnthropic && proxy.IsNativeAnthropicModel(targetModel) {
+		if routeUsesAnthropicMessages(route, cfg.NativeAnthropic, targetModel) {
 			s.proxyResponsesViaAnthropic(w, r, in, cfg, upstream, zenKey, incomingModel, targetModel, body, start)
 			return
 		}

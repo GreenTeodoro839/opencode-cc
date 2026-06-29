@@ -40,26 +40,34 @@ func (s *Server) Proxy() http.HandlerFunc {
 		cfg := s.cfg.Snapshot()
 		nativeAnthropic := cfg.NativeAnthropic
 		timeoutSeconds := cfg.RequestTimeoutSeconds
-		targetModel := s.cfg.ResolveModel(areq.Model)
+		route, ok := s.cfg.ResolveRequestRoute(areq.Model)
+		targetModel := route.TargetModel
 
-		// Pick the next upstream from the round-robin pool.
-		upstream, zenKey, ok := s.cfg.NextUpstream()
 		if !ok {
-			writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "no upstream API key configured. Set one in the web panel (Settings → upstreams).")
-			s.logFailed(ctx, r, areq.Model, targetModel, areq.Stream, http.StatusUnauthorized, "no upstream api key", body, time.Since(start))
+			status, errType, msg := s.routeErrorForAnthropic(areq.Model)
+			writeAnthropicError(w, status, errType, msg)
+			s.logFailed(ctx, r, areq.Model, targetModel, areq.Stream, status, msg, body, time.Since(start))
 			return
 		}
+		upstream, zenKey := route.BaseURL, route.APIKey
 
 		hasWebSearch := shouldUseWebSearchShim(&areq)
 		webSearchMode := cfg.ResolveWebSearchMode()
 		if hasWebSearch && webSearchMode == cfgpkg.WebSearchModeNative {
-			searchUpstream, searchKey := cfg.ResolveWebSearchUpstream(upstream, zenKey)
 			searchModel := cfg.ResolveWebSearchModel(targetModel)
+			searchRoute := route
+			if cfg.WebSearchBaseURL == "" && cfg.WebSearchAPIKey == "" && searchModel != targetModel {
+				if routedSearch, ok := s.cfg.ResolveRequestRoute(searchModel); ok {
+					searchRoute = routedSearch
+					searchModel = routedSearch.TargetModel
+				}
+			}
+			searchUpstream, searchKey := cfg.ResolveWebSearchUpstream(searchRoute.BaseURL, searchRoute.APIKey)
 			s.proxyNativeAnthropic(w, r, body, &areq, searchUpstream, searchKey, searchModel, timeoutSeconds, start)
 			return
 		}
 
-		if nativeAnthropic && proxy.IsNativeAnthropicModel(targetModel) &&
+		if routeUsesAnthropicMessages(route, nativeAnthropic, targetModel) &&
 			!(hasWebSearch && webSearchMode == cfgpkg.WebSearchModeTranslate) {
 			s.proxyNativeAnthropic(w, r, body, &areq, upstream, zenKey, targetModel, timeoutSeconds, start)
 			return
@@ -127,6 +135,73 @@ func (s *Server) Proxy() http.HandlerFunc {
 	}
 }
 
+func routeUsesAnthropicMessages(route cfgpkg.ResolvedUpstream, nativeAnthropic bool, targetModel string) bool {
+	switch route.Protocol {
+	case cfgpkg.UpstreamProtocolAnthropic:
+		return true
+	case cfgpkg.UpstreamProtocolOpenAI:
+		return false
+	default:
+		return nativeAnthropic && proxy.IsNativeAnthropicModel(targetModel)
+	}
+}
+
+func (s *Server) routeErrorForAnthropic(model string) (int, string, string) {
+	if s.cfg.HasExplicitModelRoutes() {
+		return http.StatusBadRequest, "invalid_request_error",
+			fmt.Sprintf("model %q is not configured on any enabled upstream", model)
+	}
+	return http.StatusUnauthorized, "authentication_error",
+		"no upstream API key configured. Set one in the web panel (Settings -> upstreams)."
+}
+
+func (s *Server) routeErrorForOpenAI(model string) (int, string, string) {
+	if s.cfg.HasExplicitModelRoutes() {
+		return http.StatusBadRequest, "invalid_request_error",
+			fmt.Sprintf("model %q is not configured on any enabled upstream", model)
+	}
+	return http.StatusUnauthorized, "authentication_error",
+		"no upstream API key configured. Set one in the web panel (Settings -> upstreams)."
+}
+
+func copyAnthropicRequestHeaders(dst, src http.Header, stream bool) {
+	for key, values := range src {
+		lower := strings.ToLower(key)
+		if isHopByHopHeader(lower) ||
+			lower == "authorization" ||
+			lower == "x-api-key" ||
+			lower == "content-length" ||
+			lower == "host" {
+			continue
+		}
+		if lower == "content-type" ||
+			lower == "accept" ||
+			lower == "user-agent" ||
+			lower == "request-id" ||
+			strings.HasPrefix(lower, "anthropic-") ||
+			strings.HasPrefix(lower, "x-stainless-") ||
+			strings.HasPrefix(lower, "x-request-") {
+			for _, value := range values {
+				dst.Add(key, value)
+			}
+		}
+	}
+	if dst.Get("Content-Type") == "" {
+		dst.Set("Content-Type", "application/json")
+	}
+	if stream {
+		dst.Set("Accept", "text/event-stream")
+	} else if dst.Get("Accept") == "" {
+		dst.Set("Accept", "application/json")
+	}
+	if dst.Get("User-Agent") == "" {
+		dst.Set("User-Agent", "opencode-cc/1.4")
+	}
+	if dst.Get("anthropic-version") == "" {
+		dst.Set("anthropic-version", "2023-06-01")
+	}
+}
+
 func (s *Server) proxyNativeAnthropic(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -136,7 +211,7 @@ func (s *Server) proxyNativeAnthropic(
 	timeoutSeconds int,
 	start time.Time,
 ) {
-	upBody, err := proxy.PrepareAnthropicPromptCacheBody(body, targetModel, promptCacheOptionsFromConfig(s.cfg.Snapshot()))
+	upBody, err := proxy.PrepareAnthropicPassthroughBody(body, targetModel)
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
@@ -148,23 +223,9 @@ func (s *Server) proxyNativeAnthropic(
 		writeAnthropicError(w, http.StatusInternalServerError, "api_error", "could not build upstream request: "+err.Error())
 		return
 	}
-	upReq.Header.Set("Content-Type", "application/json")
+	copyAnthropicRequestHeaders(upReq.Header, r.Header, areq.Stream)
 	upReq.Header.Set("Authorization", "Bearer "+zenKey)
 	upReq.Header.Set("x-api-key", zenKey)
-	upReq.Header.Set("User-Agent", "opencode-cc/1.3")
-	if areq.Stream {
-		upReq.Header.Set("Accept", "text/event-stream")
-	} else {
-		upReq.Header.Set("Accept", "application/json")
-	}
-	if version := r.Header.Get("anthropic-version"); version != "" {
-		upReq.Header.Set("anthropic-version", version)
-	} else {
-		upReq.Header.Set("anthropic-version", "2023-06-01")
-	}
-	if beta := r.Header.Get("anthropic-beta"); beta != "" {
-		upReq.Header.Set("anthropic-beta", beta)
-	}
 
 	httpClient := s.upstreamClient(areq.Stream, timeoutSeconds)
 	resp, err := httpClient.Do(upReq)

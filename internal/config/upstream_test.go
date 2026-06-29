@@ -135,3 +135,85 @@ func TestApplyPatchPreservesAPIKeyWhenBlank(t *testing.T) {
 		t.Fatalf("base URL was not trimmed/updated: %+v", got)
 	}
 }
+
+func TestResolveRequestRouteUsesExplicitUpstreamModels(t *testing.T) {
+	c := Default()
+	c.Upstreams = []Upstream{
+		{
+			BaseURL:  "https://deepseek.example/",
+			APIKey:   "deepseek-key",
+			Enabled:  true,
+			Protocol: UpstreamProtocolAnthropic,
+			Models: []UpstreamModel{{
+				Name:  "deepseek-chat",
+				Alias: "claude-sonnet",
+			}},
+		},
+		{
+			BaseURL:  "https://glm.example",
+			APIKey:   "glm-key",
+			Enabled:  true,
+			Protocol: UpstreamProtocolOpenAI,
+			Models: []UpstreamModel{{
+				Name:  "glm-4.6",
+				Alias: "glm-coder",
+			}},
+		},
+	}
+	c.ModelMappings = []ModelMapping{{Match: "*", Target: "fallback-model"}}
+
+	for i := 0; i < 4; i++ {
+		route, ok := c.ResolveRequestRoute("anthropic/claude-sonnet")
+		if !ok {
+			t.Fatalf("route %d not found", i)
+		}
+		if route.BaseURL != "https://deepseek.example" ||
+			route.APIKey != "deepseek-key" ||
+			route.TargetModel != "deepseek-chat" ||
+			route.Protocol != UpstreamProtocolAnthropic ||
+			!route.Explicit {
+			t.Fatalf("unexpected explicit route: %+v", route)
+		}
+	}
+
+	route, ok := c.ResolveRequestRoute("glm-coder")
+	if !ok {
+		t.Fatal("glm route not found")
+	}
+	if route.BaseURL != "https://glm.example" ||
+		route.APIKey != "glm-key" ||
+		route.TargetModel != "glm-4.6" ||
+		route.Protocol != UpstreamProtocolOpenAI {
+		t.Fatalf("unexpected glm route: %+v", route)
+	}
+
+	if _, ok := c.ResolveRequestRoute("not-configured"); ok {
+		t.Fatal("unconfigured model should not fall back when explicit routes exist")
+	}
+}
+
+func TestExplicitModelAliases(t *testing.T) {
+	c := Default()
+	c.Upstreams = []Upstream{
+		{
+			BaseURL: "https://a.example",
+			APIKey:  "ka",
+			Enabled: true,
+			Models: []UpstreamModel{
+				{Name: "deepseek-chat", Alias: "claude-sonnet"},
+				{Name: "glm-4.6"},
+			},
+		},
+		{
+			BaseURL: "https://b.example",
+			APIKey:  "kb",
+			Enabled: true,
+			Models:  []UpstreamModel{{Name: "deepseek-chat", Alias: "claude-sonnet"}},
+		},
+	}
+
+	got := c.ExplicitModelAliases()
+	if len(got) != 2 || got[0] != "claude-sonnet" || got[1] != "glm-4.6" {
+		t.Fatalf("aliases = %+v", got)
+	}
+}

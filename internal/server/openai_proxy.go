@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	cfgpkg "github.com/Kiowx/opencode-cc/internal/config"
 	"github.com/Kiowx/opencode-cc/internal/proxy"
 )
 
@@ -32,21 +33,27 @@ func (s *Server) OpenAIProxy() http.HandlerFunc {
 			return
 		}
 
-		upBody, incomingModel, targetModel, stream, err := s.prepareOpenAIRequest(body)
+		cfg := s.cfg.Snapshot()
+		upBody, incomingModel, targetModel, stream, route, routeOK, err := s.prepareOpenAIRequest(body, cfg)
 		if err != nil {
 			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
 		}
-
-		cfg := s.cfg.Snapshot()
-		upstream, zenKey, ok := s.cfg.NextUpstream()
-		if !ok {
-			const msg = "no upstream API key configured. Set one in the web panel (Settings → upstreams)."
-			writeOpenAIError(w, http.StatusUnauthorized, "authentication_error", msg)
+		if !routeOK {
+			status, errType, msg := s.routeErrorForOpenAI(incomingModel)
+			writeOpenAIError(w, status, errType, msg)
 			s.logFailed(r.Context(), r, incomingModel, targetModel, stream,
-				http.StatusUnauthorized, "no upstream api key", body, time.Since(start))
+				status, msg, body, time.Since(start))
 			return
 		}
+		if route.Protocol == cfgpkg.UpstreamProtocolAnthropic {
+			msg := fmt.Sprintf("model %q is configured for an Anthropic upstream and cannot be used through /v1/chat/completions", incomingModel)
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", msg)
+			s.logFailed(r.Context(), r, incomingModel, targetModel, stream,
+				http.StatusBadRequest, msg, body, time.Since(start))
+			return
+		}
+		upstream, zenKey := route.BaseURL, route.APIKey
 
 		upURL := strings.TrimRight(upstream, "/") + "/v1/chat/completions"
 		upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upURL, bytes.NewReader(upBody))
@@ -85,25 +92,25 @@ func (s *Server) OpenAIProxy() http.HandlerFunc {
 
 // prepareOpenAIRequest validates the JSON object and rewrites only its model
 // field, preserving extensions used by different OpenAI-compatible clients.
-func (s *Server) prepareOpenAIRequest(body []byte) ([]byte, string, string, bool, error) {
+func (s *Server) prepareOpenAIRequest(body []byte, cfg *cfgpkg.Config) ([]byte, string, string, bool, cfgpkg.ResolvedUpstream, bool, error) {
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, "", "", false, fmt.Errorf("request body is not valid OpenAI JSON: %w", err)
+		return nil, "", "", false, cfgpkg.ResolvedUpstream{}, false, fmt.Errorf("request body is not valid OpenAI JSON: %w", err)
 	}
 	if payload == nil {
-		return nil, "", "", false, fmt.Errorf("request body must be a JSON object")
+		return nil, "", "", false, cfgpkg.ResolvedUpstream{}, false, fmt.Errorf("request body must be a JSON object")
 	}
 
 	var incomingModel string
 	if raw := payload["model"]; len(raw) > 0 {
 		if err := json.Unmarshal(raw, &incomingModel); err != nil {
-			return nil, "", "", false, fmt.Errorf("model must be a string")
+			return nil, "", "", false, cfgpkg.ResolvedUpstream{}, false, fmt.Errorf("model must be a string")
 		}
 	}
 	var stream bool
 	if raw := payload["stream"]; len(raw) > 0 {
 		if err := json.Unmarshal(raw, &stream); err != nil {
-			return nil, "", "", false, fmt.Errorf("stream must be a boolean")
+			return nil, "", "", false, cfgpkg.ResolvedUpstream{}, false, fmt.Errorf("stream must be a boolean")
 		}
 	}
 	if stream {
@@ -115,14 +122,18 @@ func (s *Server) prepareOpenAIRequest(body []byte) ([]byte, string, string, bool
 		}
 	}
 
-	targetModel := s.cfg.ResolveModel(incomingModel)
+	route, ok := s.cfg.ResolveRequestRoute(incomingModel)
+	targetModel := route.TargetModel
+	if !ok {
+		return nil, incomingModel, targetModel, stream, route, false, nil
+	}
 	payload["model"], _ = json.Marshal(targetModel)
-	proxy.ApplyRawOpenAIPromptCache(payload, promptCacheOptionsFromConfig(s.cfg.Snapshot()))
+	proxy.ApplyRawOpenAIPromptCache(payload, promptCacheOptionsFromConfig(cfg))
 	upBody, err := json.Marshal(payload)
 	if err != nil {
-		return nil, "", "", false, fmt.Errorf("could not encode upstream request: %w", err)
+		return nil, "", "", false, cfgpkg.ResolvedUpstream{}, false, fmt.Errorf("could not encode upstream request: %w", err)
 	}
-	return upBody, incomingModel, targetModel, stream, nil
+	return upBody, incomingModel, targetModel, stream, route, true, nil
 }
 
 func (s *Server) relayOpenAIJSON(

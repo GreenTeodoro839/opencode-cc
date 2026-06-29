@@ -82,11 +82,43 @@ func ModelsHandler(client *http.Client, upstreamBase, apiKey func() string) http
 // URL and API key as one pair. Use this when the caller selects from a rotating
 // upstream pool, so the base URL and key cannot drift apart between callbacks.
 func ModelsHandlerWithUpstream(client *http.Client, upstream func() (base, apiKey string)) http.HandlerFunc {
+	return ModelsHandlerWithConfiguredModels(client, upstream, nil)
+}
+
+// ModelsHandlerWithConfiguredModels returns configured aliases when the caller
+// is using explicit per-upstream model routing; otherwise it falls back to the
+// live upstream /v1/models lookup.
+func ModelsHandlerWithConfiguredModels(
+	client *http.Client,
+	upstream func() (base, apiKey string),
+	configuredModels func() []string,
+) http.HandlerFunc {
 	var (
 		cache    []AnthropicModelInfo
 		cachedAt time.Time
 	)
 	return func(w http.ResponseWriter, r *http.Request) {
+		if configuredModels != nil {
+			aliases := configuredModels()
+			if len(aliases) > 0 {
+				list := make([]AnthropicModelInfo, 0, len(aliases))
+				now := time.Now().Unix()
+				for _, id := range aliases {
+					list = append(list, AnthropicModelInfo{
+						ID:        id,
+						Type:      "model",
+						Object:    "model",
+						CreatedAt: now,
+						Created:   now,
+						OwnedBy:   "configured-upstream",
+					})
+				}
+				writeJSON(w, http.StatusOK, AnthropicModelList{
+					Data: list, Object: "list", HasMore: false,
+				})
+				return
+			}
+		}
 		// Serve from cache if fresh (< 60s).
 		if len(cache) > 0 && time.Since(cachedAt) < time.Minute {
 			list := AnthropicModelList{Data: cache, Object: "list", HasMore: false}

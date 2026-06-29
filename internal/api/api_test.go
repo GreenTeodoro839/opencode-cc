@@ -218,6 +218,51 @@ func TestConfigPatchUpdatesThinkingBudgetMappings(t *testing.T) {
 	}
 }
 
+func TestConfigPatchUpdatesExplicitUpstreamModels(t *testing.T) {
+	cfg := config.Default()
+	cfg.Upstreams = []config.Upstream{{
+		BaseURL: "https://old.example",
+		APIKey:  "old-key",
+		Enabled: true,
+	}}
+	mux := newTestAPI(t, cfg)
+
+	body := bytes.NewBufferString(`{
+		"upstreams":[{
+			"base_url":"https://api.deepseek.com/anthropic/",
+			"api_key":"",
+			"name":"deepseek",
+			"enabled":true,
+			"protocol":"anthropic",
+			"models":[{"name":"deepseek-chat","alias":"claude-sonnet"}]
+		}]
+	}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/config", body)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	snap := cfg.Snapshot()
+	if len(snap.Upstreams) != 1 ||
+		snap.Upstreams[0].BaseURL != "https://api.deepseek.com/anthropic" ||
+		snap.Upstreams[0].APIKey != "old-key" ||
+		snap.Upstreams[0].Protocol != config.UpstreamProtocolAnthropic ||
+		len(snap.Upstreams[0].Models) != 1 ||
+		snap.Upstreams[0].Models[0].Name != "deepseek-chat" ||
+		snap.Upstreams[0].Models[0].Alias != "claude-sonnet" {
+		t.Fatalf("upstream route config mismatch: %+v", snap.Upstreams)
+	}
+	if strings.Contains(rec.Body.String(), "old-key") {
+		t.Fatalf("API key leaked in public config: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"protocol":"anthropic"`) ||
+		!strings.Contains(rec.Body.String(), `"alias":"claude-sonnet"`) {
+		t.Fatalf("explicit route fields missing from public config: %s", rec.Body.String())
+	}
+}
+
 func TestPanelTokenChangeInvalidatesSessions(t *testing.T) {
 	invalidateSessions()
 	t.Cleanup(invalidateSessions)
@@ -300,5 +345,72 @@ func TestTestUpstreamIncludesTopLevelElapsed(t *testing.T) {
 	}
 	if len(out.Upstreams) != 1 || !out.Upstreams[0].OK || out.Upstreams[0].ElapsedMS < 0 {
 		t.Fatalf("upstreams result wrong: %+v", out.Upstreams)
+	}
+}
+
+func TestTestUpstreamSupportsAnthropicProtocol(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			t.Fatalf("path = %q, want /v1/messages", r.URL.Path)
+		}
+		if r.Header.Get("x-api-key") != "test-key" || r.Header.Get("anthropic-version") == "" {
+			t.Fatalf("missing Anthropic headers: x-api-key=%q version=%q",
+				r.Header.Get("x-api-key"), r.Header.Get("anthropic-version"))
+		}
+		var body struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if body.Model != "deepseek-chat" {
+			t.Fatalf("probe model = %q, want deepseek-chat", body.Model)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"content":[{"type":"text","text":"pong"}],
+			"usage":{"input_tokens":3,"output_tokens":4}
+		}`))
+	}))
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.Upstreams = []config.Upstream{{
+		BaseURL:  upstream.URL,
+		APIKey:   "test-key",
+		Enabled:  true,
+		Protocol: config.UpstreamProtocolAnthropic,
+		Models:   []config.UpstreamModel{{Name: "deepseek-chat", Alias: "claude-sonnet"}},
+	}}
+	mux := newTestAPI(t, cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/test?model=claude-sonnet", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		OK               bool   `json:"ok"`
+		Model            string `json:"model"`
+		PromptTokens     int    `json:"prompt_tokens"`
+		CompletionTokens int    `json:"completion_tokens"`
+		Preview          string `json:"preview"`
+		Upstreams        []struct {
+			Protocol string `json:"protocol"`
+			Model    string `json:"model"`
+		} `json:"upstreams"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !out.OK || out.PromptTokens != 3 || out.CompletionTokens != 4 || out.Preview != "pong" {
+		t.Fatalf("unexpected probe result: %+v", out)
+	}
+	if len(out.Upstreams) != 1 ||
+		out.Upstreams[0].Protocol != config.UpstreamProtocolAnthropic ||
+		out.Upstreams[0].Model != "deepseek-chat" {
+		t.Fatalf("upstream result wrong: %+v", out.Upstreams)
 	}
 }

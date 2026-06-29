@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/Kiowx/opencode-cc/internal/config"
 )
 
 // testUpstream sends a minimal chat completion to the configured Zen endpoint
@@ -20,7 +22,13 @@ func (a *API) testUpstream(w http.ResponseWriter, r *http.Request) {
 	pool := make([]upstreamProbe, 0, len(a.cfg.Upstreams))
 	for _, u := range a.cfg.Upstreams {
 		if u.Enabled && u.APIKey != "" {
-			pool = append(pool, upstreamProbe{base: u.BaseURL, key: u.APIKey, name: u.Name})
+			pool = append(pool, upstreamProbe{
+				base:     u.BaseURL,
+				key:      u.APIKey,
+				name:     u.Name,
+				protocol: u.Protocol,
+				models:   append([]config.UpstreamModel(nil), u.Models...),
+			})
 		}
 	}
 	if len(pool) == 0 && a.cfg.UpstreamBase != "" && a.cfg.ZenAPIKey != "" {
@@ -98,20 +106,29 @@ func (a *API) testUpstream(w http.ResponseWriter, r *http.Request) {
 
 // upstreamProbe is a single upstream to test.
 type upstreamProbe struct {
-	base, key, name string
+	base, key, name, protocol string
+	models                    []config.UpstreamModel
 }
 
 // probeOne tests a single upstream and returns its result map.
 func (a *API) probeOne(up upstreamProbe, model string) map[string]any {
+	targetModel := probeTargetModel(up.models, model)
+	if targetModel == "" {
+		targetModel = model
+	}
 	result := map[string]any{
 		"ok":         false,
-		"model":      model,
+		"model":      targetModel,
 		"name":       up.name,
 		"base_url":   up.base,
+		"protocol":   probeProtocol(up.protocol),
 		"elapsed_ms": int64(0),
 	}
+	if probeProtocol(up.protocol) == config.UpstreamProtocolAnthropic {
+		return a.probeAnthropic(up, targetModel, result)
+	}
 	payload := map[string]any{
-		"model":       model,
+		"model":       targetModel,
 		"max_tokens":  16,
 		"temperature": 0,
 		"messages": []map[string]string{
@@ -169,6 +186,119 @@ func (a *API) probeOne(up upstreamProbe, model string) map[string]any {
 		result["preview"] = truncate(parsed.Choices[0].Message.Content, 200)
 	}
 	return result
+}
+
+func (a *API) probeAnthropic(up upstreamProbe, model string, result map[string]any) map[string]any {
+	payload := map[string]any{
+		"model":       model,
+		"max_tokens":  16,
+		"temperature": 0,
+		"messages": []map[string]string{
+			{"role": "user", "content": "ping"},
+		},
+	}
+	b, _ := json.Marshal(payload)
+
+	url := strings.TrimRight(up.base, "/") + "/v1/messages"
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(b))
+	if err != nil {
+		result["error"] = err.Error()
+		return result
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+up.key)
+	req.Header.Set("x-api-key", up.key)
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	start := time.Now()
+	resp, err := client.Do(req)
+	elapsed := time.Since(start).Milliseconds()
+	result["elapsed_ms"] = elapsed
+	if err != nil {
+		result["error"] = err.Error()
+		return result
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := readN(resp.Body, 2048)
+		result["error"] = fmt.Sprintf("upstream status %d: %s", resp.StatusCode, strings.TrimSpace(body))
+		return result
+	}
+
+	var parsed struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		Usage struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		result["error"] = "could not decode response: " + err.Error()
+		return result
+	}
+	result["ok"] = true
+	result["prompt_tokens"] = parsed.Usage.InputTokens
+	result["completion_tokens"] = parsed.Usage.OutputTokens
+	for _, block := range parsed.Content {
+		if block.Type == "text" && block.Text != "" {
+			result["preview"] = truncate(block.Text, 200)
+			break
+		}
+	}
+	return result
+}
+
+func probeTargetModel(models []config.UpstreamModel, requested string) string {
+	requested = stripProbePrefix(strings.TrimSpace(requested))
+	if len(models) == 0 {
+		return requested
+	}
+	for _, m := range models {
+		target := probeModelTarget(m)
+		alias := stripProbePrefix(strings.TrimSpace(m.Alias))
+		if alias == "" {
+			alias = target
+		}
+		match := stripProbePrefix(strings.TrimSpace(m.Match))
+		if requested == "" ||
+			requested == alias ||
+			requested == target ||
+			(match != "" && (match == "*" || strings.HasPrefix(requested, strings.TrimSuffix(match, "*")))) {
+			return target
+		}
+	}
+	return probeModelTarget(models[0])
+}
+
+func probeModelTarget(m config.UpstreamModel) string {
+	if name := stripProbePrefix(strings.TrimSpace(m.Name)); name != "" {
+		return name
+	}
+	return stripProbePrefix(strings.TrimSpace(m.Target))
+}
+
+func probeProtocol(protocol string) string {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case config.UpstreamProtocolAnthropic, "messages", "anthropic-messages", "claude":
+		return config.UpstreamProtocolAnthropic
+	case config.UpstreamProtocolOpenAI, "chat", "chat_completions", "chat-completions", "openai-chat":
+		return config.UpstreamProtocolOpenAI
+	default:
+		return config.UpstreamProtocolOpenAI
+	}
+}
+
+func stripProbePrefix(in string) string {
+	if i := strings.IndexByte(in, '/'); i >= 0 {
+		return in[i+1:]
+	}
+	return in
 }
 
 func readN(r interface{ Read([]byte) (int, error) }, n int) (string, error) {

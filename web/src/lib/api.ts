@@ -60,6 +60,13 @@ export interface UpstreamView {
   api_key_set: boolean;
   name: string;
   enabled: boolean;
+  protocol?: "auto" | "openai" | "anthropic" | string;
+  models?: {
+    name?: string;
+    alias?: string;
+    match?: string;
+    target?: string;
+  }[];
 }
 
 export interface PanelConfig {

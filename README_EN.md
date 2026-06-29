@@ -285,6 +285,28 @@ This compatibility layer runs locally in the proxy and does not require a native
   "upstream_base": "https://opencode.ai/zen",
   "native_anthropic": true,   // true smart-routes claude-* / qwen* target models to <upstream_base>/v1/messages
   "zen_api_key": "",           // Required Bearer token for the Zen gateway
+  "upstreams": [
+    {
+      "name": "deepseek-anthropic",
+      "base_url": "https://api.deepseek.com/anthropic",
+      "api_key": "",
+      "enabled": true,
+      "protocol": "anthropic", // auto / openai / anthropic
+      "models": [
+        { "alias": "claude-sonnet", "name": "deepseek-chat" }
+      ]
+    },
+    {
+      "name": "glm-openai",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "api_key": "",
+      "enabled": true,
+      "protocol": "openai",
+      "models": [
+        { "alias": "glm-coder", "name": "glm-4.6" }
+      ]
+    }
+  ],
   "panel_token": "",           // Web dashboard password; empty means open access
   "require_api_key": false,    // When true, /v1/* always requires a valid client API key
   "default_model": "glm-4.6",
@@ -309,8 +331,16 @@ This compatibility layer runs locally in the proxy and does not require a native
 ```
 
 Every field can be edited from the **Config** tab. Saving persists the configuration and hot-reloads the bridge by
-rebuilding the upstream client, with no restart required. Model strings without a mapping are forwarded to Zen
-unchanged.
+rebuilding the upstream client, with no restart required. `upstreams[].models` follows the CLIProxyAPI-style
+`alias -> name` shape: clients see/request the `alias`, and the proxy only rewrites `model` to the upstream `name`.
+As soon as any enabled upstream has a model table, requests are routed by that explicit table instead of round-robin
+across upstreams, and unmatched models are rejected. If no upstream model table is configured, the legacy
+`model_mappings` + upstream round-robin behavior remains in place.
+
+`protocol:"anthropic"` passes Anthropic Messages requests through to upstream `/v1/messages`, preserving
+`cache_control`, `web_search_*` server tools, metadata, and provider extensions while rewriting only `model`.
+`protocol:"openai"` uses the `/v1/chat/completions` translation path, and `protocol:"auto"` keeps the existing
+`native_anthropic` smart-routing behavior.
 
 When an OpenAI-compatible reasoning model returns `reasoning_content`, the proxy converts it into an Anthropic
 `thinking` block and replays it as `reasoning_content` on the next upstream request. This satisfies thinking-mode
