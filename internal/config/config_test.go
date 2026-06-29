@@ -36,6 +36,21 @@ func TestResolveModelExplicitMappingWins(t *testing.T) {
 	}
 }
 
+func TestResolveModelWildcardMappingExpandsTarget(t *testing.T) {
+	c := Default()
+	c.ModelMappings = []ModelMapping{
+		{Match: "claude-*", Target: "deepseek-*"},
+		{Match: "*", Target: ""},
+	}
+
+	if got := c.ResolveModel("anthropic/claude-sonnet"); got != "deepseek-sonnet" {
+		t.Fatalf("ResolveModel wildcard = %q, want deepseek-sonnet", got)
+	}
+	if got := c.ResolveModel("glm-4.6"); got != "glm-4.6" {
+		t.Fatalf("ResolveModel passthrough = %q, want glm-4.6", got)
+	}
+}
+
 func TestNativeAnthropicConfigPatch(t *testing.T) {
 	c := Default()
 	if !c.NativeAnthropic {

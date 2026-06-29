@@ -86,7 +86,7 @@ export default function Models() {
     <div className="animate-fade-in max-w-4xl">
       <PageHeader
         title="模型路由"
-        desc="把来源的 Anthropic 模型名映射到 Zen 目标模型。按顺序匹配，首条命中生效；* 为兜底规则。"
+        desc="把客户端模型名映射到上游目标模型。按顺序匹配，首条命中生效；支持 * 兜底和 claude-* 通配符。"
         actions={
           <button onClick={save} disabled={!dirty || saving} className="btn-primary">
             {saving ? <Spinner /> : <SaveIcon />}
@@ -130,7 +130,7 @@ export default function Models() {
         <div className="space-y-2">
           <div className="grid grid-cols-[1fr_1fr_auto] gap-3 px-1 pb-1 text-[10px] uppercase tracking-wider text-slate-500">
             <div>匹配（前缀或 *）</div>
-            <div>目标 Zen 模型</div>
+            <div>目标上游模型</div>
             <div />
           </div>
           {mappings.map((m, i) => (

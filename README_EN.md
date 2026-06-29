@@ -293,7 +293,7 @@ This compatibility layer runs locally in the proxy and does not require a native
       "enabled": true,
       "protocol": "anthropic", // auto / openai / anthropic
       "models": [
-        { "alias": "claude-sonnet", "name": "deepseek-chat" }
+        { "name": "deepseek-chat" }
       ]
     },
     {
@@ -303,7 +303,7 @@ This compatibility layer runs locally in the proxy and does not require a native
       "enabled": true,
       "protocol": "openai",
       "models": [
-        { "alias": "glm-coder", "name": "glm-4.6" }
+        { "name": "glm-4.6" }
       ]
     }
   ],
@@ -311,8 +311,9 @@ This compatibility layer runs locally in the proxy and does not require a native
   "require_api_key": false,    // When true, /v1/* always requires a valid client API key
   "default_model": "glm-4.6",
   "model_mappings": [
-    // Claude Code model string → actual Zen model ID
-    { "match": "claude-sonnet-4-5", "target": "glm-5.1" },
+    // Claude Code model string -> upstream target model ID
+    { "match": "claude-sonnet", "target": "deepseek-chat" },
+    { "match": "glm-coder", "target": "glm-4.6" },
     { "match": "*", "target": "" }  // Pass-through fallback
   ],
   "web_search_mode": "auto",        // auto / native / translate
@@ -331,11 +332,13 @@ This compatibility layer runs locally in the proxy and does not require a native
 ```
 
 Every field can be edited from the **Config** tab. Saving persists the configuration and hot-reloads the bridge by
-rebuilding the upstream client, with no restart required. `upstreams[].models` follows the CLIProxyAPI-style
-`alias -> name` shape: clients see/request the `alias`, and the proxy only rewrites `model` to the upstream `name`.
-As soon as any enabled upstream has a model table, requests are routed by that explicit table instead of round-robin
-across upstreams, and unmatched models are rejected. If no upstream model table is configured, the legacy
-`model_mappings` + upstream round-robin behavior remains in place.
+rebuilding the upstream client, with no restart required. `model_mappings` is the only client-visible model routing
+layer. It supports exact/prefix matches, the `*` fallback, and wildcard expansion such as
+`claude-* -> deepseek-*`. `upstreams[].models` only declares target models or wildcard patterns supported by that
+upstream, such as `deepseek-chat`, `glm-*`, or `*`. As soon as any enabled upstream has a model table, each request is
+resolved through the global mapping first, then sent to the first upstream that supports the resolved target. Unmatched
+targets are rejected. If no upstream model table is configured, the proxy uses the first enabled upstream; it no longer
+round-robins requests.
 
 `protocol:"anthropic"` passes Anthropic Messages requests through to upstream `/v1/messages`, preserving
 `cache_control`, `web_search_*` server tools, metadata, and provider extensions while rewriting only `model`.

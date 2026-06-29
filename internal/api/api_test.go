@@ -234,7 +234,7 @@ func TestConfigPatchUpdatesExplicitUpstreamModels(t *testing.T) {
 			"name":"deepseek",
 			"enabled":true,
 			"protocol":"anthropic",
-			"models":[{"name":"deepseek-chat","alias":"claude-sonnet"}]
+			"models":[{"name":"deepseek-chat"}]
 		}]
 	}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/config", body)
@@ -251,15 +251,16 @@ func TestConfigPatchUpdatesExplicitUpstreamModels(t *testing.T) {
 		snap.Upstreams[0].Protocol != config.UpstreamProtocolAnthropic ||
 		len(snap.Upstreams[0].Models) != 1 ||
 		snap.Upstreams[0].Models[0].Name != "deepseek-chat" ||
-		snap.Upstreams[0].Models[0].Alias != "claude-sonnet" {
+		snap.Upstreams[0].Models[0].Alias != "" {
 		t.Fatalf("upstream route config mismatch: %+v", snap.Upstreams)
 	}
 	if strings.Contains(rec.Body.String(), "old-key") {
 		t.Fatalf("API key leaked in public config: %s", rec.Body.String())
 	}
 	if !strings.Contains(rec.Body.String(), `"protocol":"anthropic"`) ||
-		!strings.Contains(rec.Body.String(), `"alias":"claude-sonnet"`) {
-		t.Fatalf("explicit route fields missing from public config: %s", rec.Body.String())
+		!strings.Contains(rec.Body.String(), `"name":"deepseek-chat"`) ||
+		strings.Contains(rec.Body.String(), `"alias":"claude-sonnet"`) {
+		t.Fatalf("supported model fields missing from public config: %s", rec.Body.String())
 	}
 }
 
@@ -375,12 +376,16 @@ func TestTestUpstreamSupportsAnthropicProtocol(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := config.Default()
+	cfg.ModelMappings = []config.ModelMapping{
+		{Match: "claude-sonnet", Target: "deepseek-chat"},
+		{Match: "*", Target: ""},
+	}
 	cfg.Upstreams = []config.Upstream{{
 		BaseURL:  upstream.URL,
 		APIKey:   "test-key",
 		Enabled:  true,
 		Protocol: config.UpstreamProtocolAnthropic,
-		Models:   []config.UpstreamModel{{Name: "deepseek-chat", Alias: "claude-sonnet"}},
+		Models:   []config.UpstreamModel{{Name: "deepseek-chat"}},
 	}}
 	mux := newTestAPI(t, cfg)
 
@@ -415,7 +420,7 @@ func TestTestUpstreamSupportsAnthropicProtocol(t *testing.T) {
 	}
 }
 
-func TestTestUpstreamExpandsWildcardModelRoute(t *testing.T) {
+func TestTestUpstreamUsesWildcardSupportedModel(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Model string `json:"model"`

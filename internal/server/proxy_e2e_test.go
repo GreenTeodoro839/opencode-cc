@@ -81,8 +81,7 @@ func newTestServer(t *testing.T, upstream string) (*Server, *store.Store) {
 }
 
 // newTestServerWithCfg builds a Server from an explicit, fully-configured cfg.
-// Shared by tests that need non-default upstream setups (e.g. multi-upstream
-// round-robin).
+// Shared by tests that need non-default upstream setups.
 func newTestServerWithCfg(t *testing.T, cfg *config.Config) (*Server, *store.Store) {
 	tmp := t.TempDir()
 	st, err := store.Open(tmp + "/test.db")
@@ -839,6 +838,11 @@ func TestProxyExplicitAnthropicUpstreamRoutesByModel(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.NativeAnthropic = false
+	cfg.ModelMappings = []config.ModelMapping{
+		{Match: "claude-sonnet", Target: "deepseek-chat"},
+		{Match: "glm-coder", Target: "glm-4.6"},
+		{Match: "*", Target: ""},
+	}
 	cfg.Upstreams = []config.Upstream{
 		{
 			BaseURL:  upstreamA.URL,
@@ -846,8 +850,7 @@ func TestProxyExplicitAnthropicUpstreamRoutesByModel(t *testing.T) {
 			Enabled:  true,
 			Protocol: config.UpstreamProtocolAnthropic,
 			Models: []config.UpstreamModel{{
-				Name:  "deepseek-chat",
-				Alias: "claude-sonnet",
+				Name: "deepseek-chat",
 			}},
 		},
 		{
@@ -856,8 +859,7 @@ func TestProxyExplicitAnthropicUpstreamRoutesByModel(t *testing.T) {
 			Enabled:  true,
 			Protocol: config.UpstreamProtocolAnthropic,
 			Models: []config.UpstreamModel{{
-				Name:  "glm-4.6",
-				Alias: "glm-coder",
+				Name: "glm-4.6",
 			}},
 		},
 	}
@@ -921,7 +923,7 @@ func TestProxyExplicitRoutesRejectUnconfiguredModel(t *testing.T) {
 		APIKey:   "key",
 		Enabled:  true,
 		Protocol: config.UpstreamProtocolAnthropic,
-		Models:   []config.UpstreamModel{{Name: "deepseek-chat", Alias: "claude-sonnet"}},
+		Models:   []config.UpstreamModel{{Name: "deepseek-chat"}},
 	}}
 	srv, _ := newTestServerWithCfg(t, cfg)
 

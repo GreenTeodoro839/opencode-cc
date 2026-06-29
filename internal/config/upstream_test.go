@@ -4,9 +4,9 @@ import (
 	"testing"
 )
 
-// TestNextUpstreamRoundRobin verifies requests cycle through the enabled pool
-// in order, skipping disabled/empty-key entries.
-func TestNextUpstreamRoundRobin(t *testing.T) {
+// TestNextUpstreamUsesFirstConfiguredUpstream verifies requests use the first
+// enabled upstream, skipping disabled/empty-key entries.
+func TestNextUpstreamUsesFirstConfiguredUpstream(t *testing.T) {
 	c := Default()
 	c.Upstreams = []Upstream{
 		{BaseURL: "https://a.example", APIKey: "ka", Enabled: true},
@@ -15,32 +15,14 @@ func TestNextUpstreamRoundRobin(t *testing.T) {
 		{BaseURL: "https://d.example", APIKey: "", Enabled: true},    // empty key, skipped
 	}
 
-	seen := map[string]int{}
 	for i := 0; i < 6; i++ {
 		base, key, ok := c.NextUpstream()
 		if !ok {
 			t.Fatalf("request %d: expected ok", i)
 		}
-		seen[base]++
-		// key must match the base
-		want := "ka"
-		if base == "https://b.example" {
-			want = "kb"
+		if base != "https://a.example" || key != "ka" {
+			t.Fatalf("request %d: got %s/%s, want first enabled upstream", i, base, key)
 		}
-		if key != want {
-			t.Errorf("base %s: got key %q want %q", base, key, want)
-		}
-	}
-	// 6 requests over 2 enabled upstreams → 3 each
-	if seen["https://a.example"] != 3 || seen["https://b.example"] != 3 {
-		t.Errorf("expected 3/3 across a and b, got %v", seen)
-	}
-	// disabled/empty must never be selected
-	if _, hit := seen["https://c.example"]; hit {
-		t.Errorf("disabled upstream c was selected")
-	}
-	if _, hit := seen["https://d.example"]; hit {
-		t.Errorf("empty-key upstream d was selected")
 	}
 }
 
@@ -138,6 +120,11 @@ func TestApplyPatchPreservesAPIKeyWhenBlank(t *testing.T) {
 
 func TestResolveRequestRouteUsesExplicitUpstreamModels(t *testing.T) {
 	c := Default()
+	c.ModelMappings = []ModelMapping{
+		{Match: "claude-sonnet", Target: "deepseek-chat"},
+		{Match: "glm-coder", Target: "glm-4.6"},
+		{Match: "*", Target: ""},
+	}
 	c.Upstreams = []Upstream{
 		{
 			BaseURL:  "https://deepseek.example/",
@@ -145,8 +132,7 @@ func TestResolveRequestRouteUsesExplicitUpstreamModels(t *testing.T) {
 			Enabled:  true,
 			Protocol: UpstreamProtocolAnthropic,
 			Models: []UpstreamModel{{
-				Name:  "deepseek-chat",
-				Alias: "claude-sonnet",
+				Name: "deepseek-chat",
 			}},
 		},
 		{
@@ -155,12 +141,10 @@ func TestResolveRequestRouteUsesExplicitUpstreamModels(t *testing.T) {
 			Enabled:  true,
 			Protocol: UpstreamProtocolOpenAI,
 			Models: []UpstreamModel{{
-				Name:  "glm-4.6",
-				Alias: "glm-coder",
+				Name: "glm-4.6",
 			}},
 		},
 	}
-	c.ModelMappings = []ModelMapping{{Match: "*", Target: "fallback-model"}}
 
 	for i := 0; i < 4; i++ {
 		route, ok := c.ResolveRequestRoute("anthropic/claude-sonnet")
@@ -216,15 +200,18 @@ func TestResolveRequestRouteExpandsWildcardModelName(t *testing.T) {
 	}
 }
 
-func TestResolveRequestRouteExpandsWildcardAliasIntoTarget(t *testing.T) {
+func TestResolveRequestRouteUsesGlobalWildcardMapping(t *testing.T) {
 	c := Default()
+	c.ModelMappings = []ModelMapping{
+		{Match: "claude-*", Target: "deepseek-*"},
+		{Match: "*", Target: ""},
+	}
 	c.Upstreams = []Upstream{{
 		BaseURL: "https://template.example",
 		APIKey:  "template-key",
 		Enabled: true,
 		Models: []UpstreamModel{{
-			Alias: "claude-*",
-			Name:  "deepseek-*",
+			Name: "deepseek-*",
 		}},
 	}}
 
@@ -242,13 +229,18 @@ func TestResolveRequestRouteExpandsWildcardAliasIntoTarget(t *testing.T) {
 
 func TestExplicitModelAliases(t *testing.T) {
 	c := Default()
+	c.ModelMappings = []ModelMapping{
+		{Match: "claude-sonnet", Target: "deepseek-chat"},
+		{Match: "glm-coder", Target: "glm-4.6"},
+		{Match: "*", Target: ""},
+	}
 	c.Upstreams = []Upstream{
 		{
 			BaseURL: "https://a.example",
 			APIKey:  "ka",
 			Enabled: true,
 			Models: []UpstreamModel{
-				{Name: "deepseek-chat", Alias: "claude-sonnet"},
+				{Name: "deepseek-chat"},
 				{Name: "glm-4.6"},
 			},
 		},
@@ -256,12 +248,12 @@ func TestExplicitModelAliases(t *testing.T) {
 			BaseURL: "https://b.example",
 			APIKey:  "kb",
 			Enabled: true,
-			Models:  []UpstreamModel{{Name: "deepseek-chat", Alias: "claude-sonnet"}},
+			Models:  []UpstreamModel{{Name: "deepseek-chat"}},
 		},
 	}
 
 	got := c.ExplicitModelAliases()
-	if len(got) != 2 || got[0] != "claude-sonnet" || got[1] != "glm-4.6" {
+	if len(got) != 2 || got[0] != "claude-sonnet" || got[1] != "glm-coder" {
 		t.Fatalf("aliases = %+v", got)
 	}
 }
@@ -275,12 +267,12 @@ func TestExplicitModelAliasesSkipsWildcardRoutes(t *testing.T) {
 		Models: []UpstreamModel{
 			{Name: "*"},
 			{Alias: "claude-*", Name: "deepseek-*"},
-			{Alias: "glm-coder", Name: "glm-4.6"},
+			{Name: "glm-4.6"},
 		},
 	}}
 
 	got := c.ExplicitModelAliases()
-	if len(got) != 1 || got[0] != "glm-coder" {
-		t.Fatalf("aliases = %+v, want only glm-coder", got)
+	if len(got) != 1 || got[0] != "glm-4.6" {
+		t.Fatalf("aliases = %+v, want only glm-4.6", got)
 	}
 }

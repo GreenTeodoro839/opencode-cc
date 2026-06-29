@@ -44,11 +44,12 @@ func (a *API) testUpstream(w http.ResponseWriter, r *http.Request) {
 	if model == "" {
 		model = "glm-4.6"
 	}
+	targetModel := a.cfg.ResolveModel(model)
 
 	if len(pool) == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":         false,
-			"model":      model,
+			"model":      targetModel,
 			"elapsed_ms": 0,
 			"error":      "no upstream API key configured",
 		})
@@ -61,7 +62,7 @@ func (a *API) testUpstream(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	results := make([]map[string]any, 0, len(pool))
 	for _, up := range pool {
-		results = append(results, a.probeOne(up, model))
+		results = append(results, a.probeOne(up, targetModel))
 	}
 	elapsed := time.Since(start).Milliseconds()
 	// Overall ok = all succeeded (panel can show per-upstream detail).
@@ -89,7 +90,7 @@ func (a *API) testUpstream(w http.ResponseWriter, r *http.Request) {
 	}
 	out := map[string]any{
 		"ok":                overallOK,
-		"model":             model,
+		"model":             targetModel,
 		"elapsed_ms":        elapsed,
 		"prompt_tokens":     promptTokens,
 		"completion_tokens": completionTokens,
@@ -112,10 +113,7 @@ type upstreamProbe struct {
 
 // probeOne tests a single upstream and returns its result map.
 func (a *API) probeOne(up upstreamProbe, model string) map[string]any {
-	targetModel := probeTargetModel(up.models, model)
-	if targetModel == "" {
-		targetModel = model
-	}
+	targetModel, supported := probeTargetModel(up.models, model)
 	result := map[string]any{
 		"ok":         false,
 		"model":      targetModel,
@@ -123,6 +121,11 @@ func (a *API) probeOne(up upstreamProbe, model string) map[string]any {
 		"base_url":   up.base,
 		"protocol":   probeProtocol(up.protocol),
 		"elapsed_ms": int64(0),
+	}
+	if !supported {
+		result["model"] = model
+		result["error"] = fmt.Sprintf("model %q is not configured on this upstream", model)
+		return result
 	}
 	if probeProtocol(up.protocol) == config.UpstreamProtocolAnthropic {
 		return a.probeAnthropic(up, targetModel, result)
@@ -254,89 +257,40 @@ func (a *API) probeAnthropic(up upstreamProbe, model string, result map[string]a
 	return result
 }
 
-func probeTargetModel(models []config.UpstreamModel, requested string) string {
+func probeTargetModel(models []config.UpstreamModel, requested string) (string, bool) {
 	requested = stripProbePrefix(strings.TrimSpace(requested))
+	if requested == "" {
+		return "", false
+	}
 	if len(models) == 0 {
-		return requested
+		return requested, true
 	}
 	for _, m := range models {
-		target := probeModelTarget(m)
-		alias := stripProbePrefix(strings.TrimSpace(m.Alias))
-		if alias == "" {
-			alias = target
-		}
-		match := stripProbePrefix(strings.TrimSpace(m.Match))
-		var wildcard string
-		var ok bool
-		switch {
-		case requested == "":
-			ok = true
-		case match != "":
-			wildcard, ok = probePatternMatch(match, requested, true)
-		default:
-			wildcard, ok = probePatternMatch(alias, requested, false)
-		}
-		if ok {
-			return expandProbeTarget(target, requested, wildcard)
+		if probePatternMatch(probeModelPattern(m), requested) {
+			return requested, true
 		}
 	}
-	return expandProbeTarget(probeModelTarget(models[0]), requested, "")
+	return "", false
 }
 
-func probeModelTarget(m config.UpstreamModel) string {
-	if name := stripProbePrefix(strings.TrimSpace(m.Name)); name != "" {
-		return name
+func probeModelPattern(m config.UpstreamModel) string {
+	for _, value := range []string{m.Name, m.Target, m.Alias, m.Match} {
+		if pattern := stripProbePrefix(strings.TrimSpace(value)); pattern != "" {
+			return pattern
+		}
 	}
-	return stripProbePrefix(strings.TrimSpace(m.Target))
+	return ""
 }
 
-func expandProbeTarget(target, requested, wildcard string) string {
-	target = stripProbePrefix(strings.TrimSpace(target))
-	if !strings.Contains(target, "*") {
-		return target
-	}
-	if wildcard == "" {
-		wildcard = requested
-	}
-	return strings.ReplaceAll(target, "*", wildcard)
-}
-
-func probePatternMatch(pattern, requested string, prefixMatch bool) (string, bool) {
+func probePatternMatch(pattern, requested string) bool {
 	pattern = stripProbePrefix(strings.TrimSpace(pattern))
 	if pattern == "" {
-		return "", false
-	}
-	if wildcard, ok := probeWildcardCapture(pattern, requested); ok {
-		return wildcard, true
+		return false
 	}
 	if strings.Contains(pattern, "*") {
-		return "", false
+		return probeGlobMatches(pattern, requested)
 	}
-	if prefixMatch {
-		return "", strings.HasPrefix(requested, pattern)
-	}
-	return "", requested == pattern
-}
-
-func probeWildcardCapture(pattern, value string) (string, bool) {
-	if !strings.Contains(pattern, "*") {
-		return "", false
-	}
-	if pattern == "*" {
-		return value, true
-	}
-	if strings.Count(pattern, "*") != 1 {
-		return "", probeGlobMatches(pattern, value)
-	}
-	parts := strings.SplitN(pattern, "*", 2)
-	prefix, suffix := parts[0], parts[1]
-	if !strings.HasPrefix(value, prefix) || !strings.HasSuffix(value, suffix) {
-		return "", false
-	}
-	if len(value) < len(prefix)+len(suffix) {
-		return "", false
-	}
-	return value[len(prefix) : len(value)-len(suffix)], true
+	return requested == pattern
 }
 
 func probeGlobMatches(pattern, value string) bool {

@@ -246,7 +246,7 @@ Codex 请求 `/v1/responses` 时，代理会按目标模型智能选择上游：
       "enabled": true,
       "protocol": "anthropic", // auto / openai / anthropic
       "models": [
-        { "alias": "claude-sonnet", "name": "deepseek-chat" }
+        { "name": "deepseek-chat" }
       ]
     },
     {
@@ -256,7 +256,7 @@ Codex 请求 `/v1/responses` 时，代理会按目标模型智能选择上游：
       "enabled": true,
       "protocol": "openai",
       "models": [
-        { "alias": "glm-coder", "name": "glm-4.6" }
+        { "name": "glm-4.6" }
       ]
     }
   ],
@@ -264,8 +264,9 @@ Codex 请求 `/v1/responses` 时，代理会按目标模型智能选择上游：
   "require_api_key": false,    // true 时 /v1/* 必须携带有效 API Key
   "default_model": "glm-4.6",
   "model_mappings": [
-    // Claude Code 发来的 model 字符串 → Zen 真实 model id
-    { "match": "claude-sonnet-4-5", "target": "glm-5.1" },
+    // Claude Code 发来的 model 字符串 -> 上游目标 model id
+    { "match": "claude-sonnet", "target": "deepseek-chat" },
+    { "match": "glm-coder", "target": "glm-4.6" },
     { "match": "*", "target": "" }  // 透传兜底
   ],
   "web_search_mode": "auto",        // auto / native / translate
@@ -284,7 +285,7 @@ Codex 请求 `/v1/responses` 时，代理会按目标模型智能选择上游：
 ```
 
 所有字段都可在 **Config** 标签页编辑，保存后桥接器热更新（重建上游客户端），无需重启。
-`upstreams[].models` 采用类似 CLIProxyAPI 的 `alias -> name` 方式：客户端只看到/请求 `alias`，代理转发时只把 `model` 改成上游真实 `name`。只要任一启用上游配置了模型表，请求就按模型表显式路由，不再对多个上游做 round-robin，未匹配模型会被拒绝；未配置模型表时才沿用旧的 `model_mappings` + 上游轮询兼容行为。
+`model_mappings` 是唯一的客户端模型名路由层，支持精确/前缀匹配、`*` 兜底以及 `claude-* -> deepseek-*` 这种通配符展开。`upstreams[].models` 只声明该上游支持的目标模型或通配符（如 `deepseek-chat`、`glm-*`、`*`）。只要任一启用上游配置了模型表，请求会先解析全局目标模型，再选择第一个支持该目标的上游；未匹配目标会被拒绝。未配置任何上游模型表时固定使用第一个可用上游，不再轮询。
 
 `protocol:"anthropic"` 会把 Anthropic Messages 请求直传到上游 `/v1/messages`，保留 `cache_control`、`web_search_*` server tool、metadata 和其它扩展字段，只替换 `model`。`protocol:"openai"` 走 `/v1/chat/completions` 翻译路径，`protocol:"auto"` 保持原来的 `native_anthropic` 智能判断。
 

@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 )
 
 // Default values used when nothing else is configured.
@@ -32,19 +31,21 @@ const (
 )
 
 // ModelMapping maps an incoming Anthropic model name (often "claude-*") to the
-// target model that Zen's /v1/chat/completions endpoint understands.
+// target model that the upstream endpoint understands.
 type ModelMapping struct {
 	// Match is the pattern to match against the incoming model name.
-	// Use "*" to match everything, or a prefix like "claude-".
+	// Use "*" to match everything, a prefix like "claude-", or a wildcard
+	// pattern like "claude-*".
 	Match string `json:"match"`
-	// Target is the model name sent to the upstream.
+	// Target is the model name sent to the upstream. If Target contains "*",
+	// the wildcard capture from Match is substituted into it.
 	Target string `json:"target"`
 }
 
-// UpstreamModel maps one client-visible model name to one upstream model name.
-// Name follows CLIProxyAPI's convention: it is the real model sent upstream.
-// Alias is the model exposed to clients. If Alias is empty, Name is exposed.
-// Match/Target are accepted for users who prefer the global mapping shape.
+// UpstreamModel declares one target model or wildcard pattern supported by an
+// upstream. Client-visible aliases belong in Config.ModelMappings. Alias,
+// Match, and Target remain accepted for older config files, but they are
+// interpreted only as supported target-model patterns here.
 type UpstreamModel struct {
 	Name   string `json:"name,omitempty"`
 	Alias  string `json:"alias,omitempty"`
@@ -53,15 +54,16 @@ type UpstreamModel struct {
 }
 
 // Upstream is one backend (base URL + API key) the proxy can forward to.
-// When Models is non-empty on any enabled upstream, requests are routed by
-// those explicit model aliases instead of the legacy round-robin pool.
+// When Models is non-empty on any enabled upstream, requests are routed to the
+// first upstream whose supported target-model list matches the globally mapped
+// target model.
 type Upstream struct {
 	BaseURL  string          `json:"base_url"` // e.g. https://opencode.ai/zen/go or https://opencode.ai/zen/
 	APIKey   string          `json:"api_key"`
 	Name     string          `json:"name"`               // optional human label
 	Enabled  bool            `json:"enabled"`            // skip when false
 	Protocol string          `json:"protocol,omitempty"` // auto, openai, anthropic
-	Models   []UpstreamModel `json:"models,omitempty"`   // explicit model routes for this upstream
+	Models   []UpstreamModel `json:"models,omitempty"`   // supported target models/patterns for this upstream
 }
 
 // ResolvedUpstream is the concrete route for a single request.
@@ -100,9 +102,11 @@ type Config struct {
 	NativeAnthropic bool `json:"native_anthropic"`
 	// ZenAPIKey is the bearer token used to authenticate against Zen.
 	ZenAPIKey string `json:"zen_api_key"`
-	// Upstreams is the round-robin pool of backends. When non-empty it takes
-	// precedence over the legacy single UpstreamBase/ZenAPIKey fields; those
-	// are kept for backward compatibility and auto-migration.
+	// Upstreams is the configured backend list. Model requests are routed by
+	// resolving the global model_mappings target, then selecting the first
+	// enabled upstream whose models list supports that target. When no upstream
+	// declares models, the first enabled upstream is used for legacy single-
+	// backend compatibility.
 	Upstreams []Upstream `json:"upstreams"`
 	// PanelToken gates access to the web panel and its API. If empty the panel
 	// is open (convenient for local use). Set one before exposing the port.
@@ -155,7 +159,6 @@ type Config struct {
 	dataDir    string
 	configPath string
 	mu         sync.RWMutex
-	rr         uint64 // round-robin cursor for NextUpstream (atomic)
 }
 
 // Patch represents a partial update from the control panel. Pointer fields
@@ -272,19 +275,18 @@ func (c *Config) migrateLegacyUpstream() {
 }
 
 // ResolveRequestRoute returns the upstream selected for one incoming model.
-// New-style configs use Upstream.Models as an allowlist/route table. When any
-// enabled upstream has at least one model entry, unmatched model names do not
-// fall back to round-robin. Old configs without per-upstream models keep the
-// legacy ResolveModel + NextUpstream behavior.
+// The global ModelMappings table is the only client-model alias layer. After
+// resolving that target model, per-upstream Models entries are used only as
+// allowlists for target models. Requests are never round-robined.
 func (c *Config) ResolveRequestRoute(in string) (ResolvedUpstream, bool) {
 	c.mu.RLock()
-	hasExplicitRoutes := c.hasExplicitModelRoutesLocked()
-	if route, ok := c.explicitRouteLocked(in); ok {
+	target := c.resolveModelLocked(in)
+	hasModelScopedUpstreams := c.hasModelScopedUpstreamsLocked()
+	if route, ok := c.routeForTargetLocked(in, target); ok {
 		c.mu.RUnlock()
 		return route, true
 	}
 
-	target := c.resolveModelLocked(in)
 	pool := make([]Upstream, 0, len(c.Upstreams))
 	for _, u := range c.Upstreams {
 		if u.Enabled && u.APIKey != "" {
@@ -294,23 +296,7 @@ func (c *Config) ResolveRequestRoute(in string) (ResolvedUpstream, bool) {
 	legacyBase, legacyKey := c.UpstreamBase, c.ZenAPIKey
 	c.mu.RUnlock()
 
-	if hasExplicitRoutes {
-		return ResolvedUpstream{
-			IncomingModel: in,
-			TargetModel:   target,
-			Protocol:      UpstreamProtocolAuto,
-		}, false
-	}
-	if len(pool) == 0 {
-		if legacyBase != "" && legacyKey != "" {
-			return ResolvedUpstream{
-				BaseURL:       strings.TrimRight(legacyBase, "/"),
-				APIKey:        legacyKey,
-				Protocol:      routeProtocolForTarget(UpstreamProtocolAuto, target),
-				IncomingModel: in,
-				TargetModel:   target,
-			}, true
-		}
+	if hasModelScopedUpstreams {
 		return ResolvedUpstream{
 			IncomingModel: in,
 			TargetModel:   target,
@@ -318,82 +304,95 @@ func (c *Config) ResolveRequestRoute(in string) (ResolvedUpstream, bool) {
 		}, false
 	}
 
-	n := uint64(len(pool))
-	idx := atomic.AddUint64(&c.rr, 1) % n
-	u := pool[idx]
-	protocol := routeProtocolForTarget(normalizeUpstreamProtocol(u.Protocol), target)
+	if len(pool) > 0 {
+		u := pool[0]
+		return ResolvedUpstream{
+			BaseURL:       strings.TrimRight(u.BaseURL, "/"),
+			APIKey:        u.APIKey,
+			Name:          u.Name,
+			Protocol:      routeProtocolForTarget(normalizeUpstreamProtocol(u.Protocol), target),
+			IncomingModel: in,
+			TargetModel:   target,
+		}, true
+	}
+
+	if legacyBase != "" && legacyKey != "" {
+		return ResolvedUpstream{
+			BaseURL:       strings.TrimRight(legacyBase, "/"),
+			APIKey:        legacyKey,
+			Protocol:      routeProtocolForTarget(UpstreamProtocolAuto, target),
+			IncomingModel: in,
+			TargetModel:   target,
+		}, true
+	}
+
 	return ResolvedUpstream{
-		BaseURL:       strings.TrimRight(u.BaseURL, "/"),
-		APIKey:        u.APIKey,
-		Name:          u.Name,
-		Protocol:      protocol,
 		IncomingModel: in,
 		TargetModel:   target,
-	}, true
+		Protocol:      UpstreamProtocolAuto,
+	}, false
 }
 
-// HasExplicitModelRoutes reports whether this config is in per-upstream model
-// routing mode.
+// HasExplicitModelRoutes reports whether at least one usable upstream declares
+// supported target models.
 func (c *Config) HasExplicitModelRoutes() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.hasExplicitModelRoutesLocked()
+	return c.hasModelScopedUpstreamsLocked()
 }
 
-// ExplicitModelAliases returns the client-visible aliases from all enabled
-// per-upstream model routes. Empty means the legacy live /v1/models lookup
-// should be used instead.
+// ExplicitModelAliases returns concrete client-visible names from the global
+// model mapping table. If no concrete aliases are configured, it falls back to
+// concrete upstream target models. Wildcards are deliberately omitted.
 func (c *Config) ExplicitModelAliases() []string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	seen := map[string]bool{}
 	out := make([]string, 0)
+	for _, m := range c.ModelMappings {
+		alias := stripProviderPrefix(strings.TrimSpace(m.Match))
+		if alias == "" || alias == "*" || strings.Contains(alias, "*") || seen[alias] {
+			continue
+		}
+		seen[alias] = true
+		out = append(out, alias)
+	}
+	if len(out) > 0 {
+		return out
+	}
 	for _, u := range c.Upstreams {
 		if !u.Enabled || u.APIKey == "" {
 			continue
 		}
 		for _, m := range u.Models {
-			alias := upstreamModelAlias(m)
-			if alias == "" || strings.Contains(alias, "*") || seen[alias] {
+			model := upstreamModelPattern(m)
+			if model == "" || strings.Contains(model, "*") || seen[model] {
 				continue
 			}
-			seen[alias] = true
-			out = append(out, alias)
+			seen[model] = true
+			out = append(out, model)
 		}
 	}
 	return out
 }
 
-// NextUpstream returns the next backend by round-robin for a request.
-// Enabled upstreams with a non-empty key are cycled through atomically. If the
-// Upstreams pool is empty it falls back to the legacy single fields. ok is false
-// when no usable upstream is configured (the caller should respond with an
-// "upstream not configured" error).
+// NextUpstream returns the first usable backend. It is retained for legacy
+// callers such as live /v1/models lookup, but it no longer round-robins.
 func (c *Config) NextUpstream() (base, key string, ok bool) {
 	c.mu.RLock()
-	// Snapshot the enabled pool under the read lock.
-	pool := make([]Upstream, 0, len(c.Upstreams))
 	for _, u := range c.Upstreams {
 		if u.Enabled && u.APIKey != "" {
-			pool = append(pool, u)
+			c.mu.RUnlock()
+			return strings.TrimRight(u.BaseURL, "/"), u.APIKey, true
 		}
 	}
 	legacyBase, legacyKey := c.UpstreamBase, c.ZenAPIKey
 	c.mu.RUnlock()
 
-	if len(pool) == 0 {
-		if legacyBase != "" && legacyKey != "" {
-			return strings.TrimRight(legacyBase, "/"), legacyKey, true
-		}
-		return "", "", false
+	if legacyBase != "" && legacyKey != "" {
+		return strings.TrimRight(legacyBase, "/"), legacyKey, true
 	}
-	// Atomic round-robin: advance the cursor and pick modulo the pool size.
-	// AddUint64 returns the new value; we use (old+1) % n to spread the first
-	// pick across callers.
-	n := uint64(len(pool))
-	idx := atomic.AddUint64(&c.rr, 1) % n
-	u := pool[idx]
-	return strings.TrimRight(u.BaseURL, "/"), u.APIKey, true
+	return "", "", false
 }
 
 // applyEnv overlays environment variables on top of the loaded config.
@@ -544,15 +543,16 @@ func (c *Config) ResolveModel(in string) string {
 func (c *Config) resolveModelLocked(in string) string {
 	bare := stripProviderPrefix(in)
 	for _, m := range c.ModelMappings {
-		if m.Match == "*" || strings.HasPrefix(in, m.Match) || strings.HasPrefix(bare, m.Match) {
-			if m.Target == "" {
+		if wildcard, ok := modelMappingMatches(m.Match, in, bare); ok {
+			target := expandModelMappingTarget(m.Target, bare, wildcard)
+			if target == "" {
 				// Pass-through: use the (de-prefixed) incoming model name.
 				if bare != "" {
 					return bare
 				}
 				break // fall through to DefaultModel
 			}
-			return m.Target
+			return target
 		}
 	}
 	if c.DefaultModel != "" {
@@ -745,7 +745,7 @@ func cloneUpstreams(in []Upstream) []Upstream {
 	return out
 }
 
-func (c *Config) hasExplicitModelRoutesLocked() bool {
+func (c *Config) hasModelScopedUpstreamsLocked() bool {
 	for _, u := range c.Upstreams {
 		if u.Enabled && u.APIKey != "" && len(u.Models) > 0 {
 			return true
@@ -754,134 +754,109 @@ func (c *Config) hasExplicitModelRoutesLocked() bool {
 	return false
 }
 
-func (c *Config) explicitRouteLocked(in string) (ResolvedUpstream, bool) {
-	bare := stripProviderPrefix(in)
+func (c *Config) routeForTargetLocked(in, target string) (ResolvedUpstream, bool) {
 	for _, u := range c.Upstreams {
 		if !u.Enabled || u.APIKey == "" || len(u.Models) == 0 {
 			continue
 		}
-		for _, m := range u.Models {
-			match, ok := upstreamModelMatches(m, in, bare)
-			if !ok {
-				continue
-			}
-			target := expandUpstreamModelTarget(upstreamModelTarget(m), bare, match)
-			if target == "" {
-				target = bare
-			}
-			if target == "" {
-				target = c.resolveModelLocked(in)
-			}
-			protocol := routeProtocolForTarget(normalizeUpstreamProtocol(u.Protocol), target)
-			return ResolvedUpstream{
-				BaseURL:       strings.TrimRight(u.BaseURL, "/"),
-				APIKey:        u.APIKey,
-				Name:          u.Name,
-				Protocol:      protocol,
-				IncomingModel: in,
-				TargetModel:   target,
-				Explicit:      true,
-			}, true
+		if !upstreamSupportsTarget(u.Models, target) {
+			continue
 		}
+		protocol := routeProtocolForTarget(normalizeUpstreamProtocol(u.Protocol), target)
+		return ResolvedUpstream{
+			BaseURL:       strings.TrimRight(u.BaseURL, "/"),
+			APIKey:        u.APIKey,
+			Name:          u.Name,
+			Protocol:      protocol,
+			IncomingModel: in,
+			TargetModel:   target,
+			Explicit:      true,
+		}, true
 	}
 	return ResolvedUpstream{}, false
 }
 
-type upstreamModelMatch struct {
-	Wildcard string
-}
-
-func upstreamModelMatches(m UpstreamModel, in, bare string) (upstreamModelMatch, bool) {
-	if pattern := strings.TrimSpace(m.Match); pattern != "" {
-		return modelPatternMatches(pattern, in, bare)
-	}
-	alias := upstreamModelAlias(m)
-	if alias == "" {
-		return upstreamModelMatch{}, false
-	}
-	return modelNameMatches(alias, in, bare)
-}
-
-func upstreamModelAlias(m UpstreamModel) string {
-	if alias := strings.TrimSpace(m.Alias); alias != "" {
-		return stripProviderPrefix(alias)
-	}
-	if match := strings.TrimSpace(m.Match); match != "" && match != "*" && !strings.HasSuffix(match, "*") {
-		return stripProviderPrefix(match)
-	}
-	return stripProviderPrefix(upstreamModelTarget(m))
-}
-
-func upstreamModelTarget(m UpstreamModel) string {
-	if name := strings.TrimSpace(m.Name); name != "" {
-		return stripProviderPrefix(name)
-	}
-	return stripProviderPrefix(strings.TrimSpace(m.Target))
-}
-
-func expandUpstreamModelTarget(target, bare string, match upstreamModelMatch) string {
-	target = stripProviderPrefix(strings.TrimSpace(target))
-	if target == "" {
-		return ""
-	}
-	if !strings.Contains(target, "*") {
-		return target
-	}
-	replacement := match.Wildcard
-	if replacement == "" {
-		replacement = bare
-	}
-	if replacement == "" {
-		return ""
-	}
-	return strings.ReplaceAll(target, "*", replacement)
-}
-
-func modelPatternMatches(pattern, in, bare string) (upstreamModelMatch, bool) {
+func modelMappingMatches(pattern, in, bare string) (string, bool) {
 	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return "", false
+	}
 	for _, value := range modelMatchCandidates(pattern, in, bare) {
 		if wildcard, ok := modelWildcardCapture(pattern, value); ok {
-			return upstreamModelMatch{Wildcard: wildcard}, true
+			return wildcard, true
 		}
 	}
 	if strings.Contains(pattern, "*") {
 		barePattern := stripProviderPrefix(pattern)
 		for _, value := range modelMatchCandidates(barePattern, in, bare) {
 			if wildcard, ok := modelWildcardCapture(barePattern, value); ok {
-				return upstreamModelMatch{Wildcard: wildcard}, true
+				return wildcard, true
 			}
 		}
-		return upstreamModelMatch{}, false
+		return "", false
 	}
 	barePattern := stripProviderPrefix(pattern)
 	if strings.HasPrefix(in, pattern) || strings.HasPrefix(bare, pattern) ||
 		strings.HasPrefix(in, barePattern) || strings.HasPrefix(bare, barePattern) {
-		return upstreamModelMatch{}, true
+		return "", true
 	}
-	return upstreamModelMatch{}, false
+	return "", false
 }
 
-func modelNameMatches(name, in, bare string) (upstreamModelMatch, bool) {
-	name = strings.TrimSpace(name)
-	for _, value := range modelMatchCandidates(name, in, bare) {
-		if wildcard, ok := modelWildcardCapture(name, value); ok {
-			return upstreamModelMatch{Wildcard: wildcard}, true
+func expandModelMappingTarget(target, bare, wildcard string) string {
+	target = stripProviderPrefix(strings.TrimSpace(target))
+	if target == "" || !strings.Contains(target, "*") {
+		return target
+	}
+	if wildcard == "" {
+		wildcard = bare
+	}
+	if wildcard == "" {
+		return ""
+	}
+	return strings.ReplaceAll(target, "*", wildcard)
+}
+
+func upstreamSupportsTarget(models []UpstreamModel, target string) bool {
+	target = strings.TrimSpace(target)
+	bare := stripProviderPrefix(target)
+	if target == "" && bare == "" {
+		return false
+	}
+	for _, m := range models {
+		if modelPatternMatchesTarget(upstreamModelPattern(m), target, bare) {
+			return true
 		}
 	}
-	if strings.Contains(name, "*") {
-		bareName := stripProviderPrefix(name)
-		for _, value := range modelMatchCandidates(bareName, in, bare) {
-			if wildcard, ok := modelWildcardCapture(bareName, value); ok {
-				return upstreamModelMatch{Wildcard: wildcard}, true
+	return false
+}
+
+func upstreamModelPattern(m UpstreamModel) string {
+	for _, value := range []string{m.Name, m.Target, m.Alias, m.Match} {
+		if pattern := stripProviderPrefix(strings.TrimSpace(value)); pattern != "" {
+			return pattern
+		}
+	}
+	return ""
+}
+
+func modelPatternMatchesTarget(pattern, target, bare string) bool {
+	pattern = stripProviderPrefix(strings.TrimSpace(pattern))
+	if pattern == "" {
+		return false
+	}
+	for _, value := range modelMatchCandidates(pattern, target, bare) {
+		if strings.Contains(pattern, "*") {
+			if modelGlobMatches(pattern, value) {
+				return true
 			}
+			continue
 		}
-		return upstreamModelMatch{}, false
+		if value == pattern {
+			return true
+		}
 	}
-	bareName := stripProviderPrefix(name)
-	if in == name || bare == name || in == bareName || bare == bareName {
-		return upstreamModelMatch{}, true
-	}
-	return upstreamModelMatch{}, false
+	return false
 }
 
 func modelMatchCandidates(pattern, in, bare string) []string {

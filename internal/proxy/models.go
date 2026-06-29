@@ -85,9 +85,9 @@ func ModelsHandlerWithUpstream(client *http.Client, upstream func() (base, apiKe
 	return ModelsHandlerWithConfiguredModels(client, upstream, nil)
 }
 
-// ModelsHandlerWithConfiguredModels returns configured aliases when the caller
-// is using explicit per-upstream model routing; otherwise it falls back to the
-// live upstream /v1/models lookup.
+// ModelsHandlerWithConfiguredModels returns configured client-visible model
+// names when available; otherwise it falls back to the live upstream /v1/models
+// lookup.
 func ModelsHandlerWithConfiguredModels(
 	client *http.Client,
 	upstream func() (base, apiKey string),
@@ -99,11 +99,11 @@ func ModelsHandlerWithConfiguredModels(
 	)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if configuredModels != nil {
-			aliases := configuredModels()
-			if len(aliases) > 0 {
-				list := make([]AnthropicModelInfo, 0, len(aliases))
+			models := configuredModels()
+			if len(models) > 0 {
+				list := make([]AnthropicModelInfo, 0, len(models))
 				now := time.Now().Unix()
-				for _, id := range aliases {
+				for _, id := range models {
 					list = append(list, AnthropicModelInfo{
 						ID:        id,
 						Type:      "model",

@@ -18,7 +18,7 @@ interface UpstreamRow {
 
 interface UpstreamModelRow {
   name: string;
-  alias: string;
+  alias?: string;
   match?: string;
   target?: string;
 }
@@ -78,8 +78,7 @@ export default function Settings() {
         enabled: u.enabled,
         protocol: u.protocol || "auto",
         models: (u.models || []).map((m) => ({
-          name: m.name || m.target || "",
-          alias: m.alias || (m.match && m.match !== "*" ? m.match : ""),
+          name: m.name || m.target || m.alias || (m.match && m.match !== "*" ? m.match : "") || "",
           match: m.match,
           target: m.target,
         })),
@@ -138,11 +137,8 @@ export default function Settings() {
           models: u.models
             .map((m) => ({
               name: m.name.trim(),
-              alias: m.alias.trim(),
-              match: (m.match || "").trim(),
-              target: (m.target || "").trim(),
             }))
-            .filter((m) => m.name || m.alias || m.match || m.target),
+            .filter((m) => m.name),
         })),
       };
       const updated = await api.putConfig(body);
@@ -159,8 +155,7 @@ export default function Settings() {
             enabled: u.enabled,
             protocol: u.protocol || "auto",
             models: (u.models || []).map((m) => ({
-              name: m.name || m.target || "",
-              alias: m.alias || (m.match && m.match !== "*" ? m.match : ""),
+              name: m.name || m.target || m.alias || (m.match && m.match !== "*" ? m.match : "") || "",
               match: m.match,
               target: m.target,
             })),
@@ -219,7 +214,7 @@ export default function Settings() {
     setUpstreams((prev) =>
       prev.map((u, idx) =>
         idx === upstreamIndex
-          ? { ...u, models: [...u.models, { alias: "", name: "" }] }
+          ? { ...u, models: [...u.models, { name: "" }] }
           : u
       )
     );
@@ -264,7 +259,7 @@ export default function Settings() {
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <KeyIcon />
-            <h3 className="text-sm font-semibold text-slate-200">上游与模型路由</h3>
+            <h3 className="text-sm font-semibold text-slate-200">上游与接入模型</h3>
             {upstreams.filter((u) => u.enabled && (u.api_key_set || u.api_key.trim())).length > 0 ? (
               <Badge tone="green">{upstreams.filter((u) => u.enabled && (u.api_key_set || u.api_key.trim())).length} 个可用</Badge>
             ) : (
@@ -277,7 +272,7 @@ export default function Settings() {
         </div>
 
         <p className="text-xs text-slate-500 mb-4">
-          为每个上游指定协议和接入模型。只要任一上游配置了模型表，请求会按 alias 精确路由，不再按请求轮询。Base URL 可从下拉选预设（
+          为每个上游指定协议和支持的目标模型。客户端模型名统一在「模型路由」页映射；这里的模型表只决定哪些目标模型接入到该上游。未配置模型表时固定使用第一个可用上游。Base URL 可从下拉选预设（
           <span className="font-mono text-slate-400">/zen/go</span> go 套餐、
           <span className="font-mono text-slate-400">/zen/</span> 默认），或选「自定义」填任意 OpenAI 兼容端点。Key 仅本地保存，除转发给上游外不会外发。
         </p>
@@ -381,28 +376,22 @@ export default function Settings() {
                   </div>
                   <div>
                     <div className="flex items-center justify-between">
-                      <label className="label">模型路由</label>
+                      <label className="label">支持模型</label>
                       <button onClick={() => addModel(i)} className="btn-ghost !py-1 !text-xs">
                         + 模型
                       </button>
                     </div>
                     {u.models.length === 0 ? (
                       <div className="rounded-lg border border-white/[0.05] bg-ink-900/40 px-3 py-2 text-xs text-slate-500">
-                        未配置模型表时沿用旧映射与轮询；配置后只接入表内 alias。
+                        未配置模型表时固定使用第一个可用上游；配置后只接入表内目标模型。
                       </div>
                     ) : (
                       <div className="space-y-2">
                         {u.models.map((m, j) => (
-                          <div key={j} className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-2">
+                          <div key={j} className="grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-2">
                             <input
                               className="input font-mono"
-                              placeholder="客户端 alias，例如 claude-sonnet"
-                              value={m.alias}
-                              onChange={(e) => updateModel(i, j, { alias: e.target.value })}
-                            />
-                            <input
-                              className="input font-mono"
-                              placeholder="上游 model，例如 deepseek-chat"
+                              placeholder="目标模型或通配符，例如 deepseek-chat / glm-* / *"
                               value={m.name}
                               onChange={(e) => updateModel(i, j, { name: e.target.value })}
                             />
